@@ -2424,6 +2424,14 @@ try {
       run(u('e_y', 'eo7'), ['/智造平台/品质部/检验标准.xlsx'], 'write').decision === 'allow'
       && run(u('e_y', 'eo7'), ['/外贸平台/合同.xlsx'], 'read').decision === 'deny',
       JSON.stringify(run(u('e_y', 'eo7'), ['/智造平台/品质部/检验标准.xlsx'], 'write')))
+    check('根目录只读列举（B 语义）：作用域内用户列根放行、写根仍拒、越界子路径不变、无作用域用户列根仍拒',
+      run(u('e_m', 'eo3'), ['/'], 'read').decision === 'allow'
+      && run(u('e_m', 'eo3'), ['/'], 'read').reasons.some((r) => r.includes('root-listing'))
+      && run(u('e_m', 'eo3'), ['/'], 'write').decision === 'deny'
+      && run(u('e_m', 'eo3'), ['/外部目录/x.txt'], 'read').decision === 'deny'
+      && run(u('e_z', 'eo7'), ['/'], 'read').decision === 'deny'
+      && run(u('e_y', 'eo7'), ['/'], 'read').decision === 'allow',
+      JSON.stringify({ mRootRead: run(u('e_m', 'eo3'), ['/'], 'read').decision, mRootWrite: run(u('e_m', 'eo3'), ['/'], 'write').decision, yRootRead: run(u('e_y', 'eo7'), ['/'], 'read').decision, zRootRead: run(u('e_z', 'eo7'), ['/'], 'read').decision }))
     check('负责人悬空检测：质检线在列', findVacantLeaderOrgs(idx, { withUserOrgIds: new Set(['eo3', 'eo4']) }).some((o) => o.id === 'eo4'))
 
     // 判定序：显式 deny > 显式 allow > 角色矩阵 > 默认 deny
