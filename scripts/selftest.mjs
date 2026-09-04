@@ -3641,23 +3641,30 @@ try {
     portalEmployees.status === 200 && portalEmployees.headers['access-control-allow-origin'] === 'http://192.168.0.8:8443'
     && Array.isArray(portalEmployees.body.data) && portalEmployees.body.data.some((item) => item.id === targetAgent.id && item.avatar && typeof item.skills === 'string'))
   const portalSkills = await portalJson('/skills')
-  check('/skills：已上架 Skill 契约（downloadUrl 为门户公开下载端点绝对地址）',
+  check('/skills：已上架 Skill 契约（downloadUrl 为门户登录下载端点绝对地址）',
     portalSkills.status === 200 && Array.isArray(portalSkills.body.data) && portalSkills.body.data.length >= 1
     && portalSkills.body.data.every((item) => /^https?:\/\/.+\/api\/portal\/skills\/.+\/download$/.test(item.downloadUrl)))
   const portalSkillDl = await rawReq('GET', new URL(portalSkills.body.data[0].downloadUrl).pathname)
-  check('downloadUrl 免鉴权可直接下载（200 + zip 魔数 PK + attachment 头）',
-    portalSkillDl.status === 200 && String(portalSkillDl.headers['content-type']).includes('zip')
-    && portalSkillDl.body.startsWith('PK') && String(portalSkillDl.headers['content-disposition']).includes('attachment'), JSON.stringify({ status: portalSkillDl.status, type: portalSkillDl.headers['content-type'] }))
-  const portalDlMissing = await portalJson('/skills/skl_not_exist/download')
-  check('未上架/未知技能下载 404 契约错误', portalDlMissing.status === 404 && portalDlMissing.body.code === 40400)
+  check('downloadUrl 未登录被拒 401 契约错误（v1.1：必须登录）',
+    portalSkillDl.status === 401 && portalSkillDl.headers['content-type'].includes('json') && jsonBody(portalSkillDl).code === 40100, JSON.stringify({ status: portalSkillDl.status }))
+  const portalSkillDlBad = await rawReq('GET', new URL(portalSkills.body.data[0].downloadUrl).pathname, { headers: { authorization: 'Bearer dst1_forged_token' } })
+  check('无效令牌下载被拒 401（不泄露技能存在性）', portalSkillDlBad.status === 401 && jsonBody(portalSkillDlBad).code === 40100)
+  const portalSkillDlAuth = await rawReq('GET', new URL(portalSkills.body.data[0].downloadUrl).pathname, { headers: { authorization: `Bearer ${admin}` } })
+  check('携带登录令牌可下载（200 + zip 魔数 PK + attachment 头）',
+    portalSkillDlAuth.status === 200 && String(portalSkillDlAuth.headers['content-type']).includes('zip')
+    && portalSkillDlAuth.body.startsWith('PK') && String(portalSkillDlAuth.headers['content-disposition']).includes('attachment'), JSON.stringify({ status: portalSkillDlAuth.status, type: portalSkillDlAuth.headers['content-type'] }))
+  const portalDlUnknownAuth = await rawReq('GET', '/api/portal/skills/skl_not_exist/download', { headers: { authorization: `Bearer ${admin}` } })
+  check('未上架/未知技能下载 404 契约错误（登录后）', portalDlUnknownAuth.status === 404 && jsonBody(portalDlUnknownAuth).code === 40400)
+  const portalDownloadAudit = (await api('GET', '/api/audit/logs?action=portal.skill.download&limit=5', { token: admin })).data?.items ?? []
+  check('下载审计落账（谁在下载：actor=登录用户）', Array.isArray(portalDownloadAudit) && portalDownloadAudit.some((item) => item.actorId && item.actorId !== 'portal-feed' && String(item.detail ?? '').includes('via=')), JSON.stringify(portalDownloadAudit?.[0] ?? {}))
   const portalStats = await portalJson('/stats', { origin: portalOrigin })
   check('/stats：恰 4 卡且 value 为字符串（契约明确非数值）', portalStats.body.data.length === 4 && portalStats.body.data.every((item) => typeof item.value === 'string' && item.unit !== undefined && item.label !== undefined))
   check('/stats 口径：已上线应用计数与 /apps 一致', Number(portalStats.body.data[0].value) === portalAppsAfter.body.data.length)
   const portalSolutions = await portalJson('/solutions')
   const portalTools = await portalJson('/tools')
   check('/solutions、/tools：暂无数据源 → 空数组（门户契约 §5：降级展示内置样板）', portalSolutions.body.data?.length === 0 && portalTools.body.data?.length === 0)
-  const portalPreflight = await rawReq('OPTIONS', '/api/portal/apps', { headers: { origin: portalOrigin, 'access-control-request-method': 'GET' } })
-  check('OPTIONS 预检 204 + 放行方法/来源头', portalPreflight.status === 204 && portalPreflight.headers['access-control-allow-origin'] === portalOrigin && String(portalPreflight.headers['access-control-allow-methods']).includes('GET'))
+  const portalPreflight = await rawReq('OPTIONS', '/api/portal/apps', { headers: { origin: portalOrigin, 'access-control-request-method': 'GET', 'access-control-request-headers': 'authorization, content-type' } })
+  check('OPTIONS 预检 204 + 放行方法/来源/authorization 请求头', portalPreflight.status === 204 && portalPreflight.headers['access-control-allow-origin'] === portalOrigin && String(portalPreflight.headers['access-control-allow-methods']).includes('GET') && String(portalPreflight.headers['access-control-allow-headers']).includes('authorization'))
   const portalUnknown = await portalJson('/nope', { origin: portalOrigin })
   check('未知端点 404 契约错误（门户展示错误与重试，不影响其他端点）', portalUnknown.status === 404 && portalUnknown.body.code === 40400)
   const portalNoOrigin = await portalGet('/stats')

@@ -3,8 +3,9 @@
  *
  * 企业门户（http://192.168.0.4:8092，纯前端静态站点）按「拉取（Pull）」策略主动来宿主平台
  * 获取已发布的 AI 应用 / 数字员工等数据（接口契约：docs/portal-integration.md，对接文档
- * api.md v1.0）。本插件只实现 6 个公开只读 GET 端点 + CORS 放行 + 可见性审计留痕，
- * 不向门户发起任何推送/回调请求。
+ * api.md v1.1）。本插件只实现 6 个公开只读 GET 端点 + CORS 放行 + 可见性审计留痕，
+ * 不向门户发起任何推送/回调请求。v1.1 变更：技能包下载须携带门户登录令牌（Bearer），
+ * 未登录 401、放行下载记审计（谁/时间/内容/IP）；预检放行 authorization 请求头。
  *
  * 边界（刻意保持，门户对接方式可能随门户方演进）：
  *   - 可整体停用：PORTAL_SYNC=off；摘除 = 删除本目录 + boot-all/cordis.yml 各一行，
@@ -63,11 +64,12 @@ export class PortalFeedService extends Service {
   }
 
   /**
-   * 已上架技能包字节（门户公开下载，downloadUrl 的应答端）。
+   * 已上架技能包字节（downloadUrl 的应答端；api.md v1.1 §4.7：须携带门户登录令牌）。
    * 仅 status=published 的当前已发布版本可取；经 skillHub.download 登记下载计量
    * （内部自带容错），再取与 NAS 上架产物同源的 zip 字节。
+   * 审计口径（谁在下载）：actor=解析出的平台用户，detail 带令牌通道与来源 IP。
    */
-  skillPackage(skillId: string): { buffer: Buffer; filename: string } | undefined {
+  skillPackage(skillId: string, downloader: { id: string; name: string; via: string; ip?: string }): { buffer: Buffer; filename: string } | undefined {
     try {
       const skill = this.ctx.skillHub.skills().get(skillId)
       if (!skill || skill.status !== 'published') return undefined
@@ -76,20 +78,53 @@ export class PortalFeedService extends Service {
       if (!published) return undefined
       const pkg = this.ctx.skillHub.packageOf(skillId, version)
       try {
-        this.ctx.skillHub.download(skillId, version, { id: 'portal', name: '企业门户（匿名拉取）' })
+        this.ctx.skillHub.download(skillId, version, { id: downloader.id, name: downloader.name })
       } catch {
         // 下载计量失败不阻断取包
       }
       try {
         this.ctx.audit.record({
-          type: 'invoke', actorType: 'system', actorId: 'portal-feed', actorName: '门户数据通道',
+          type: 'invoke', actorType: 'human', actorId: downloader.id, actorName: downloader.name,
           action: 'portal.skill.download', resourceType: 'skill', resourceId: skillId, resourceName: skill.name,
-          result: 'ok', detail: `门户公开下载：version=${version} bytes=${pkg.buffer.length}（免鉴权内网通道）`,
+          result: 'ok',
+          detail: `门户登录下载：via=${downloader.via} version=${version} bytes=${pkg.buffer.length}${downloader.ip ? ` ip=${downloader.ip}` : ''}`,
         })
       } catch {
         // 留痕失败不阻断下载
       }
       return { buffer: pkg.buffer, filename: pkg.filename }
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * 下载者身份解析（api.md v1.1 §4.7：必须登录才可下载）。Bearer 令牌 → 平台用户；
+   * 兼容门户持有的两类令牌：平台会话令牌（dst1.*，authn.verify）与 OIDC access token
+   * （门户 OIDC 登录换取；userinfo 校验含 token_use/有效客户端/jti 吊销/用户实时状态）。
+   * 缺失或解析失败返回 undefined（路由层回 401，不泄露技能存在性）。
+   */
+  resolveDownloader(authorization: unknown): { id: string; name: string; via: string } | undefined {
+    const raw = typeof authorization === 'string' ? authorization.trim() : ''
+    if (!/^bearer\s+/i.test(raw)) return undefined
+    const token = raw.replace(/^bearer\s+/i, '').trim()
+    if (!token) return undefined
+    try {
+      const verified = this.ctx.authn.verify(token)
+      const principal = verified.principal
+      const userId = principal.refType === 'user' ? principal.refId ?? '' : ''
+      if (userId) {
+        const user = this.ctx.iam.users().get(userId)
+        if (user && user.status === 'active') return { id: user.id, name: user.displayName, via: 'session' }
+      }
+      // 机器主体（如门户后端凭证的服务端到服务端拉取）：以主体身份计量，不冒充个人
+      return { id: principal.id, name: principal.name, via: 'machine' }
+    } catch {
+      // 非 dst1 形态令牌，继续按 OIDC 解析
+    }
+    try {
+      const claims = this.ctx.oidc.userinfo(token)
+      return { id: String(claims.sub ?? ''), name: String(claims.name ?? claims.preferred_username ?? ''), via: 'oidc' }
     } catch {
       return undefined
     }
@@ -158,7 +193,7 @@ function respond(exchange: HttpExchange, status: number, payload: unknown, heade
 }
 
 export const name = 'portal'
-export const inject = ['httpServer', 'platformBus', 'resourceCore', 'iam', 'skillHub', 'mcpRegistry', 'audit']
+export const inject = ['httpServer', 'platformBus', 'resourceCore', 'iam', 'skillHub', 'mcpRegistry', 'audit', 'authn', 'oidc']
 
 export function apply(ctx: Context) {
   const service = new PortalFeedService(ctx)
@@ -176,7 +211,8 @@ export function apply(ctx: Context) {
           exchange.res.writeHead(204, {
             ...headers,
             'access-control-allow-methods': 'GET, OPTIONS',
-            'access-control-allow-headers': 'content-type',
+            // authorization：门户 v1.1 起下载须携带 Bearer 登录令牌（预检必须放行该自定义头）
+            'access-control-allow-headers': 'authorization, content-type',
             'access-control-max-age': '600',
           })
           exchange.res.end()
@@ -187,10 +223,17 @@ export function apply(ctx: Context) {
         respond(exchange, 405, { code: 40500, message: '门户契约为只读 GET，不支持该方式', data: null }, headers)
         return true
       }
-      // 技能包公开下载（downloadUrl 的应答端）：zip 字节直出，非 JSON 契约
+      // 技能包下载（downloadUrl 的应答端）：api.md v1.1 §4.7 —— 必须登录（Bearer 门户令牌），
+      // 未带/无效令牌一律 401 契约错误（先于存在性判断，不泄露技能 ID），CORS 头照常携带（浏览器可读）
       const downloadMatch = exchange.path.slice(prefix.length).match(/^\/skills\/([^/]+)\/download$/)
       if (downloadMatch) {
-        const pkg = service.skillPackage(decodeURIComponent(downloadMatch[1]!))
+        const downloader = service.resolveDownloader(exchange.headers.authorization)
+        if (!downloader) {
+          respond(exchange, 401, { code: 40100, message: '下载需要登录：请携带门户登录令牌（Authorization: Bearer <token>）', data: null }, headers)
+          return true
+        }
+        const ip = String(exchange.raw.socket?.remoteAddress ?? 'unknown')
+        const pkg = service.skillPackage(decodeURIComponent(downloadMatch[1]!), { ...downloader, ip })
         if (!pkg) {
           respond(exchange, 404, { code: 40400, message: '技能不存在或未上架，无可下载包', data: null }, headers)
           return true
@@ -222,9 +265,9 @@ export function apply(ctx: Context) {
           message: 'ok',
           data: {
             service: 'portal-feed',
-            contract: 'api.md v1.0',
+            contract: 'api.md v1.1',
             endpoints: ENDPOINTS,
-            subResources: ['skills/:id/download（技能包公开下载，即 skills[].downloadUrl）'],
+            subResources: ['skills/:id/download（技能包下载，须 Bearer 登录令牌：未登录 401，审计谁在下载）'],
             generatedAt: new Date().toISOString(),
           },
         }, headers)

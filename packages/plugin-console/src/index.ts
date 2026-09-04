@@ -409,8 +409,13 @@ export function apply(ctx: Context) {
         roles: user.roleIds.map((roleId) => ctx.iam.roles().get(roleId)?.name).filter(Boolean),
         permissions: ctx.iam.userPermissions(user.id),
       }
-      render('登录成功', `<div class="ok">✓</div><h2>欢迎回来，${escapeHtml(user.displayName)}</h2><p>正在进入控制台…</p>`,
-        `<script>localStorage.setItem('heng_ops_token', ${JSON.stringify(result.session.token)}); localStorage.setItem('heng_ops_refresh', ${JSON.stringify(result.session.refreshToken)}); localStorage.setItem('heng_ops_user', ${JSON.stringify(JSON.stringify(sessionUser))}); location.replace('/#/dashboard')</script>`)
+      // 登录成功落库后按暂存的 OIDC 授权请求（heng_ops_sso_oidc_req，与授权请求同为 5 分钟有效）回到
+      // 授权页继续 consent——AI 应用发起的「先登录再授权」流才能闭环；无暂存则进控制台
+      render('登录成功', `<div class="ok">✓</div><h2>欢迎回来，${escapeHtml(user.displayName)}</h2><p>正在继续…</p>`,
+        `<script>localStorage.setItem('heng_ops_token', ${JSON.stringify(result.session.token)}); localStorage.setItem('heng_ops_refresh', ${JSON.stringify(result.session.refreshToken)}); localStorage.setItem('heng_ops_user', ${JSON.stringify(JSON.stringify(sessionUser))});
+var resume=null;try{resume=JSON.parse(localStorage.getItem('heng_ops_sso_oidc_req')||'null')}catch(e){resume=null}
+localStorage.removeItem('heng_ops_sso_oidc_req');
+if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.req)&&Date.now()-(resume.ts||0)<300000){location.replace('/#/oauth/authorize?req='+resume.req)}else{location.replace('/#/dashboard')}</script>`)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       console.error('[sso-callback] 三方授权失败：', message)

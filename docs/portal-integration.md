@@ -76,9 +76,12 @@ BASE = http://192.168.0.7:7300/api/portal
 应用 `tag` 优先取发布渠道 `channels[0]`，未登记渠道时用应用形态（Web/H5/小程序/桌面端/API）；
 `accent` 为平台按 id 稳定生成的卡片主题色（#RRGGBB）；`dept` 取归属组织名（组织未命名时回退空串/作者名）。
 
-`skills.downloadUrl`：已上架技能包的**公开下载端点绝对地址**（`<对外基址>/api/portal/skills/:id/download`，
-免鉴权、zip 直出、浏览器点击即下载）。平台侧按「企业门户（匿名拉取）」登记下载计量与审计（`portal.skill.download`）；
-仅 `published` 状态技能可下载，未上架/未知 id 返回 404 契约错误。
+`skills.downloadUrl`：已上架技能包的**登录下载端点绝对地址**（`<对外基址>/api/portal/skills/:id/download`，
+zip 直出）。**api.md v1.1 起该端点必须携带门户登录令牌**：请求头 `Authorization: Bearer <token>`
+（门户 OIDC 登录换取的 access_token 或平台会话令牌均可），未带/无效令牌返回 401 契约错误
+（`{code:40100,...}`），登录后未上架/未知 id 返回 404。平台按解析出的登录用户登记下载计量与审计
+（`portal.skill.download`：谁、时间、下载了什么、来源 IP）；仅 `published` 状态技能可下载。
+配套 CORS：门户预检 `OPTIONS` 已放行 `authorization` 请求头（`Access-Control-Allow-Headers: authorization, content-type`）。
 
 ## 三、CORS（契约 §6，未放行则门户无法访问）
 

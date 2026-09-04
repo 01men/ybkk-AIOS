@@ -48,10 +48,10 @@ export function renderLogin(app) {
       </div>
       <div class="login-panel">
         <h2 id="login-title">登录控制台</h2>
-        <div class="sub" id="login-sub">使用平台账号或钉钉扫码登录</div>
+        <div class="sub" id="login-sub">使用钉钉扫码或平台账号登录</div>
         <div class="segmented" style="margin-bottom:24px" id="login-tabs">
-          <span class="segmented-item active" data-tab="password">账号密码</span>
           <span class="segmented-item" data-tab="dingtalk">钉钉扫码</span>
+          <span class="segmented-item active" data-tab="password">账号密码</span>
         </div>
 
         <form class="login-form" id="login-form-password">
@@ -151,6 +151,14 @@ export function renderLogin(app) {
     })
   }
   // 三方登录入口按平台配置显隐：未启用任何登录连接器时仅展示账号密码
+  // 钉钉扫码为平台默认登录方式：连接器可用即默认选中（用户已手动切换则不覆盖）
+  let loginTabTouched = false
+  const switchLoginTab = (name) => {
+    app.querySelectorAll('#login-tabs .segmented-item').forEach((item) => item.classList.toggle('active', item.dataset.tab === name))
+    const isPassword = name === 'password'
+    tabPassword.style.display = isPassword ? '' : 'none'
+    tabDing.style.display = isPassword ? 'none' : ''
+  }
   void api.get('/api/auth/providers').then((data) => {
     const dingtalkProviders = (data?.providers ?? []).filter((item) => item.provider === 'dingtalk')
     if (!dingtalkProviders.length) {
@@ -158,15 +166,13 @@ export function renderLogin(app) {
       $('#login-sub').textContent = '使用平台账号登录'
       return
     }
+    if (!loginTabTouched) switchLoginTab('dingtalk')
     renderDingtalkEntry(dingtalkProviders)
   }).catch(() => { /* 查询失败时保持默认展示 */ })
   app.querySelectorAll('#login-tabs .segmented-item').forEach((el) => {
     el.onclick = () => {
-      app.querySelectorAll('#login-tabs .segmented-item').forEach((item) => item.classList.remove('active'))
-      el.classList.add('active')
-      const isPassword = el.dataset.tab === 'password'
-      tabPassword.style.display = isPassword ? '' : 'none'
-      tabDing.style.display = isPassword ? 'none' : ''
+      loginTabTouched = true
+      switchLoginTab(el.dataset.tab)
     }
   })
 
@@ -237,6 +243,17 @@ export function renderLogin(app) {
     session.save(result.token, result.user)
     if (result.refreshToken) session.saveRefresh(result.refreshToken)
     toast(`欢迎回来，${result.user.displayName}`)
+    // 承接回跳：从 OIDC 授权页发起的钉钉登录（含回调转本页完成首绑/注册的分支），
+    // 登录后按暂存的授权请求（与授权请求同为 5 分钟有效）回授权页继续 consent，而非进控制台
+    let resume = null
+    try {
+      resume = JSON.parse(localStorage.getItem('heng_ops_sso_oidc_req') ?? 'null')
+      localStorage.removeItem('heng_ops_sso_oidc_req')
+    } catch { /* 票据损坏则忽略，走常规入口 */ }
+    if (resume && typeof resume.req === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(resume.req) && Date.now() - (resume.ts ?? 0) < 300_000) {
+      location.hash = `#/oauth/authorize?req=${resume.req}`
+      return
+    }
     location.hash = '#/dashboard'
   }
 

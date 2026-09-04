@@ -1,7 +1,7 @@
 /**
  * OAuth 协议页（平台作为身份源 IdP 的三个对外页面，独立于控制台外壳）：
- *   #/oauth/authorize?req=<id> —— 授权确认（无会话渲染登录面板：账号密码 + 钉钉免密，连接器启用时；
- *                                  有会话按需 consent）
+ *   #/oauth/authorize?req=<id> —— 授权确认（无会话渲染登录面板：账号密码 + 钉钉整页跳转扫码授权，
+ *                                  钉钉客户端内自动免登，mock 模式回退手动授权码；有会话按需 consent）
  *   #/oauth/error?error=…     —— 协议错误页（静态展示，error_description 一律转义）
  *   #/oauth/logout?…          —— RP 发起登出中转（清平台会话后带 state 跳回应用）
  * 说明：本页直连原始 fetch（不经 api.js 会话拦截），保证协议流不被控制台跳转劫持。
@@ -81,8 +81,8 @@ function renderLoginPanel(app, reqId, info) {
   app.innerHTML = pageShell(`
     <div class="oauth-sub" style="margin-bottom:14px">登录平台账号后继续授权给 <b>${esc(info.clientName)}</b></div>
     <div class="segmented" style="margin-bottom:18px" id="oauth-login-tabs">
-      <span class="segmented-item active" data-tab="password">账号密码</span>
       <span class="segmented-item" data-tab="dingtalk">钉钉扫码</span>
+      <span class="segmented-item active" data-tab="password">账号密码</span>
     </div>
     <form id="oauth-login-form">
       <div class="form-item">
@@ -97,22 +97,29 @@ function renderLoginPanel(app, reqId, info) {
     </form>
     <div id="oauth-login-dingtalk" style="display:none">
       <div id="oauth-ding-step-authorize">
-        <div style="text-align:center;padding:4px 0 2px">
-          <div style="width:148px;height:148px;margin:0 auto;border-radius:14px;background:
-            radial-gradient(100px 100px at 30% 25%, #e0e7ff, transparent),
-            radial-gradient(100px 100px at 75% 80%, #ede9fe, transparent), #f8f9fb;
-            border:1px solid var(--border);display:grid;place-items:center;position:relative">
-            <div style="color:var(--brand-500)">${icon('fingerprint', 52)}</div>
-            <div style="position:absolute;bottom:10px;font-size:11px;color:var(--text-3)">使用钉钉扫码授权登录</div>
+        <div id="oauth-ding-oauth-list">
+          <button class="btn btn-primary btn-lg btn-block" id="oauth-ding-oauth-go" type="button">使用钉钉扫码 / 点击头像登录</button>
+        </div>
+        <div class="form-hint" style="margin:8px 0 4px">整页跳转钉钉授权：已登录钉钉点击头像即可完成，未登录则出二维码扫码；在钉钉客户端内打开会自动识别登录状态发起免登。</div>
+        <details id="oauth-ding-manual" style="margin-top:12px">
+          <summary class="form-hint" style="cursor:pointer">手动输入授权码（演示/mock 备用）</summary>
+          <div style="text-align:center;padding:10px 0 6px">
+            <div style="width:148px;height:148px;margin:0 auto;border-radius:14px;background:
+              radial-gradient(100px 100px at 30% 25%, #e0e7ff, transparent),
+              radial-gradient(100px 100px at 75% 80%, #ede9fe, transparent), #f8f9fb;
+              border:1px solid var(--border);display:grid;place-items:center;position:relative">
+              <div style="color:var(--brand-500)">${icon('fingerprint', 52)}</div>
+              <div style="position:absolute;bottom:10px;font-size:11px;color:var(--text-3)">使用钉钉扫码授权登录</div>
+            </div>
           </div>
-        </div>
-        <div class="form-item" style="margin-top:14px">
-          <label class="form-label">钉钉授权码</label>
-          <input class="input input-lg" id="oauth-ding-code" placeholder="请输入钉钉扫码授权码">
-        </div>
-        <div id="oauth-ding-actions">
-          <button class="btn btn-primary btn-lg btn-block" id="oauth-ding-submit">免密登录并继续</button>
-        </div>
+          <div class="form-item" style="margin-top:14px">
+            <label class="form-label">钉钉授权码</label>
+            <input class="input input-lg" id="oauth-ding-code" placeholder="请输入钉钉扫码授权码">
+          </div>
+          <div id="oauth-ding-actions">
+            <button class="btn btn-primary btn-lg btn-block" id="oauth-ding-submit">免密登录并继续</button>
+          </div>
+        </details>
       </div>
       <div id="oauth-ding-step-pending" style="display:none">
         <div class="muted-box" style="display:flex;gap:8px;margin-bottom:14px">
@@ -135,24 +142,21 @@ function renderLoginPanel(app, reqId, info) {
       </div>
       <div class="form-hint" id="oauth-ding-tip" style="margin-top:10px"></div>
     </div>`)
-  // 三方登录入口按平台连接器配置显隐（与主登录页同一探测端点与规则）
-  void rawJson('GET', '/api/auth/providers').then((result) => {
-    const dingtalkProviders = (result.payload?.data?.providers ?? []).filter((item) => item.provider === 'dingtalk')
-    if (!dingtalkProviders.length) {
-      app.querySelector('#oauth-login-tabs').style.display = 'none'
-      return
-    }
-    renderDingtalkButtons(dingtalkProviders)
-  }).catch(() => { /* 查询失败时保持默认展示 */ })
+  // 三方登录入口按平台连接器配置显隐（与主登录页同一探测端点与规则）：探测在下方入口渲染函数定义后执行
   const tabPassword = app.querySelector('#oauth-login-form')
   const tabDingtalk = app.querySelector('#oauth-login-dingtalk')
+  // 用户是否手动切过标签：自动选中钉钉默认标签时不覆盖用户选择
+  let tabTouched = false
+  const switchTab = (name) => {
+    app.querySelectorAll('#oauth-login-tabs .segmented-item').forEach((item) => item.classList.toggle('active', item.dataset.tab === name))
+    const isPassword = name === 'password'
+    tabPassword.style.display = isPassword ? '' : 'none'
+    tabDingtalk.style.display = isPassword ? 'none' : ''
+  }
   app.querySelectorAll('#oauth-login-tabs .segmented-item').forEach((el) => {
     el.onclick = () => {
-      app.querySelectorAll('#oauth-login-tabs .segmented-item').forEach((item) => item.classList.remove('active'))
-      el.classList.add('active')
-      const isPassword = el.dataset.tab === 'password'
-      tabPassword.style.display = isPassword ? '' : 'none'
-      tabDingtalk.style.display = isPassword ? 'none' : ''
+      tabTouched = true
+      switchTab(el.dataset.tab)
     }
   })
 
@@ -184,6 +188,8 @@ function renderLoginPanel(app, reqId, info) {
   const finishSsoLogin = (data) => {
     session.save(data.token, data.user)
     if (data.refreshToken) session.saveRefresh(data.refreshToken)
+    // 本页内完成登录：清理可能残留的 OIDC 回跳暂存（consent 在本页继续，无需回跳）
+    try { localStorage.removeItem(OIDC_REQ_KEY) } catch { /* 忽略 */ }
     renderConsent(app, reqId, info)
   }
   const unwrap = (result, fallback) => {
@@ -214,16 +220,70 @@ function renderLoginPanel(app, reqId, info) {
     }
   }
   app.querySelector('#oauth-ding-submit').onclick = (e) => void submitDingCode(e.currentTarget)
-  // 多主体接入时每个主体一个登录按钮；仅一条或无主体名称时保持默认单按钮外观
-  const renderDingtalkButtons = (providers) => {
-    if (providers.length < 2) return
-    const holder = app.querySelector('#oauth-ding-actions')
-    holder.innerHTML = providers.map((item, index) => `
-      <button class="btn btn-primary btn-lg btn-block" style="${index ? 'margin-top:8px' : ''}" data-config-id="${esc(item.configId ?? '')}">钉钉登录（${esc(item.name || item.corpId || '未命名主体')}）</button>`).join('')
-    holder.querySelectorAll('[data-config-id]').forEach((btn) => {
-      btn.onclick = () => void submitDingCode(btn, btn.dataset.configId || undefined)
+
+  // 整页跳转钉钉统一授权（与主登录页同链路）：跳转前暂存本页授权请求 id（与授权请求同为 5 分钟有效），
+  // SSO 回调登录成功后据此回到本页继续 consent，AI 应用的授权流才不会断在登录环节
+  const OIDC_REQ_KEY = 'heng_ops_sso_oidc_req'
+  // 上次使用的接入主体（多主体部署时保持入口视觉一致；身份归属最终以钉钉组织选择为准）
+  let preferredConfigId = ''
+  try { preferredConfigId = localStorage.getItem('heng_ops_last_sso_config') ?? '' } catch { /* 忽略 */ }
+  const showManualFallback = (message) => {
+    const manual = app.querySelector('#oauth-ding-manual')
+    if (manual) manual.open = true
+    if (message) dingTip(message)
+  }
+  const startDingOauth = async (btn, configId, auto) => {
+    btn.classList.add('btn-loading')
+    try {
+      const auth = unwrap(await rawJson('POST', '/api/auth/sso/authorize', { provider: 'dingtalk', scene: 'web_qr', ...(configId ? { configId } : {}) }), '钉钉登录暂不可用')
+      if (!auth.authorizeUrl) throw new Error('身份源未返回授权地址（可能为 mock 模式），请手动输入授权码')
+      try { localStorage.setItem(OIDC_REQ_KEY, JSON.stringify({ req: reqId, ts: Date.now() })) } catch { /* 忽略 */ }
+      try { localStorage.setItem('heng_ops_last_sso_config', configId ?? '') } catch { /* 忽略 */ }
+      // 必须整页跳转：弹窗/iframe 会被第三方 Cookie 策略拦截导致授权失败
+      window.location.href = auth.authorizeUrl
+    } catch (error) {
+      btn.classList.remove('btn-loading')
+      // 自动免登失败（如 mock 模式）静默降级到手动授权码兜底，不打断页面
+      if (auto) showManualFallback(error.message)
+      else dingTip(error.message)
+    }
+  }
+  // 多主体接入时保持与主登录页一致的入口形态：主按钮直达钉钉授权页，其余主体降级为次要链接
+  const renderDingtalkEntry = (providers) => {
+    const holder = app.querySelector('#oauth-ding-oauth-list')
+    if (!providers.some((item) => (item.configId ?? '') === preferredConfigId)) {
+      preferredConfigId = providers[0]?.configId ?? ''
+    }
+    if (providers.length < 2) {
+      holder.querySelector('#oauth-ding-oauth-go').onclick = (e) => void startDingOauth(e.currentTarget, preferredConfigId || undefined)
+      return
+    }
+    const others = providers.filter((item) => (item.configId ?? '') !== preferredConfigId)
+    holder.innerHTML = `
+      <button class="btn btn-primary btn-lg btn-block" id="oauth-ding-oauth-go" type="button">使用钉钉扫码 / 点击头像登录</button>
+      ${others.length ? `<div class="form-hint" style="margin-top:8px;text-align:center">其他已接入主体：${others.map((item, index) => `
+        <a class="fs-12" style="color:var(--brand-500);cursor:pointer;margin-left:${index ? 8 : 0}px" data-config-id="${esc(item.configId ?? '')}">${esc(item.name || item.corpId || '未命名主体')}</a>`).join('')}</div>` : ''}`
+    holder.querySelector('#oauth-ding-oauth-go').onclick = (e) => void startDingOauth(e.currentTarget, preferredConfigId || undefined)
+    holder.querySelectorAll('[data-config-id]').forEach((el) => {
+      el.onclick = () => void startDingOauth(holder.querySelector('#oauth-ding-oauth-go'), el.dataset.configId || undefined)
     })
   }
+  // 三方登录入口按平台连接器配置显隐（与主登录页同一探测端点与规则）
+  void rawJson('GET', '/api/auth/providers').then((result) => {
+    const dingtalkProviders = (result.payload?.data?.providers ?? []).filter((item) => item.provider === 'dingtalk')
+    if (!dingtalkProviders.length) {
+      app.querySelector('#oauth-login-tabs').style.display = 'none'
+      return
+    }
+    // 钉钉扫码为平台默认登录方式：连接器可用即默认选中（用户已手动切换则不覆盖）
+    if (!tabTouched) switchTab('dingtalk')
+    renderDingtalkEntry(dingtalkProviders)
+    // 钉钉客户端内（工作台打开 AI 应用 → 跳转本授权页）自动识别登录态：直接发起授权免登
+    if (/DingTalk/i.test(navigator.userAgent)) {
+      const go = app.querySelector('#oauth-ding-oauth-go')
+      if (go) void startDingOauth(go, preferredConfigId || undefined, true)
+    }
+  }).catch(() => { /* 查询失败时保持默认展示 */ })
   app.querySelectorAll('#oauth-login-dingtalk .tab[data-ptab]').forEach((el) => {
     el.onclick = () => {
       app.querySelectorAll('#oauth-login-dingtalk .tab[data-ptab]').forEach((t) => t.classList.remove('active'))
