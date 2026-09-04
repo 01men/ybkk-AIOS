@@ -4,12 +4,3 @@ events:
   - name: nas.registered / nas.onlined / nas.offlined
     mode: emit
     description: NAS 资产生命周期
-  - name: nas.authz.denied / nas.authz.decision
-    mode: emit
-    description: NAS 数据权限判定（deny 告警联动 / 留痕异步落库）
-  - name: nas.authz.leaderVacant / nas.authz.dirOrphan
-    mode: emit
-    description: 负责人悬空 / 组织目录对账不匹配告警（R1/R3）
-  - name: nas.authz.cGroupDrift
-    mode: emit+on
-    description: C 关联动态组漂移（iam 发 / nasAuthz 订阅转告警，R5）

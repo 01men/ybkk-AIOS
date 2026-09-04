@@ -6,7 +6,6 @@ depends: ['dsh-plugin-platform-core', 'dsh-plugin-iam']
 provides:
   services:
     - authn
-    - entryTickets
 permissions:
   - authn.principal.read
   - authn.principal.write

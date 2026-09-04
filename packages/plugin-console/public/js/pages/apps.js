@@ -5,7 +5,7 @@ import {
   h, $, $$, esc, toast, openDrawer, openModal, confirmDialog, copyText,
   statusBadge, renderTable, collectForm, field, inputField, selectField, textareaField,
   fmtNum, fmtPct, fmtCost, fmtTime, timeAgo, emptyState, lineChart, maybeShowConceptCard,
-  multiSelectField, mountSearchableSelects,
+  multiSelectField, searchableSelectField, mountSearchableSelects,
 } from '../ui.js'
 import { buildAppOnboardingText, openOnboardingModal } from '../onboarding.js'
 import {
@@ -14,6 +14,16 @@ import {
 } from './agents.js'
 
 const APP_TYPE = { web: ['Web 应用', 'globe'], h5: ['H5', 'app'], miniapp: ['小程序', 'app'], desktop: ['桌面端', 'server'], api: ['API 服务', 'plug'] }
+
+const isIconUrl = (value) => /^https?:\/\//i.test(String(value ?? '').trim())
+
+/** 头像 / 图标渲染：http(s) 图片地址渲染为 <img> 头像，其余按 emoji 文本展示（.res-icon 同尺寸）。 */
+function appIconHtml(value) {
+  if (isIconUrl(value)) {
+    return `<img class="res-icon" src="${esc(String(value).trim())}" alt="" referrerpolicy="no-referrer" style="object-fit:cover;background:linear-gradient(135deg,#eef2ff,#e0e7ff)">`
+  }
+  return `<div class="res-icon" style="background:linear-gradient(135deg,#eef2ff,#e0e7ff);font-size:21px">${esc(String(value ?? '').trim() || '✨')}</div>`
+}
 
 /** 平台授权直达：签发一次性入场票据后带 #entry_ticket 打开应用（裸跳转已下线，与应用自有 OIDC 接入互不影响）。 */
 async function openAppEntry(app) {
@@ -61,7 +71,7 @@ export async function renderApps(content, params, ctx) {
     const card = h(`
       <div class="res-card" data-id="${esc(app.id)}">
         <div class="res-card-top">
-          <div class="res-icon" style="background:linear-gradient(135deg,#eef2ff,#e0e7ff);font-size:21px">${esc(app.attrs['icon'] ?? '✨')}</div>
+          ${appIconHtml(app.attrs['icon'])}
           <div class="grow">
             <div class="res-name">${esc(app.name)} ${statusBadge(app.status)}</div>
             <div class="res-slug">${esc(app.slug)} · ${esc(typeLabel_)}${app.attrs['publishVersion'] ? ' · ' + esc(app.attrs['publishVersion']) : ''}</div>
@@ -79,7 +89,7 @@ export async function renderApps(content, params, ctx) {
           <span class="metric">${icon('users', 13)}DAU ${fmtNum(app.metrics.dau)}</span>
           <span class="metric">${icon('activity', 13)}会话 ${fmtNum(app.metrics.sessions)}</span>
           ${app.attrs['url'] ? `<a class="btn btn-ghost btn-sm" data-entry href="javascript:void(0)">${icon('external', 13)}打开</a>` : ''}
-          <span style="margin-left:auto" class="text-4">${esc(app.attrs['ownerName'] ?? '')}</span>
+          <span style="margin-left:auto" class="text-4">${app.attrs['developerName'] ? `开发者 · ${esc(app.attrs['developerName'])}` : ''}</span>
         </div>
       </div>`)
     const entryBtn = card.querySelector('[data-entry]')
@@ -95,8 +105,11 @@ export async function renderApps(content, params, ctx) {
 
 async function openAppDetail(id, ctx) {
   const app = await api.get(`/api/apps/${id}`)
+  const titleIcon = isIconUrl(app.attrs['icon'])
+    ? `<img src="${esc(String(app.attrs['icon']).trim())}" alt="" referrerpolicy="no-referrer" style="width:22px;height:22px;border-radius:6px;object-fit:cover;vertical-align:-4px;margin-right:6px">`
+    : esc(app.attrs['icon'] ?? '✨')
   const drawer = openDrawer({
-    title: `${app.attrs['icon'] ?? '✨'} ${app.name}`,
+    title: `${titleIcon} ${esc(app.name)}`,
     sub: `${app.slug} · ${app.attrs['url'] ?? '未登记访问地址'}`,
     wide: true,
     body: `
@@ -104,6 +117,7 @@ async function openAppDetail(id, ctx) {
         ${statusBadge(app.status)}
         <span class="badge ${riskClass(app.attrs['riskLevel'])} no-dot">风险：${riskLabel(app.attrs['riskLevel'])}</span>
         <span class="badge badge-info no-dot">密级：${dataClassLabel(app.attrs['dataClass'])}</span>
+        ${app.attrs['developerName'] ? `<span class="badge badge-muted no-dot">${icon('user', 12)} 开发者：${esc(app.attrs['developerName'])}</span>` : ''}
         ${(app.attrs['channels'] ?? []).map((ch) => `<span class="badge badge-muted no-dot">${esc(ch)}</span>`).join('')}
         ${app.attrs['url'] ? `<button class="btn btn-default btn-sm" id="app-open-entry">${icon('external', 13)}带平台身份打开应用</button>` : '<span class="text-4 fs-12">未登记访问地址</span>'}
       </div>
@@ -129,6 +143,8 @@ async function openAppDetail(id, ctx) {
       const isL4 = t.action === 'online' || t.action === 'offline'
       return `<button class="btn ${isL4 ? 'btn-primary' : 'btn-default'}" data-action="${esc(t.action)}">${icon(t.action === 'online' ? 'play' : t.action === 'offline' ? 'alert' : 'chevronRight', 14)}${esc(t.label)}</button>`
     }).join('') || '<button class="btn btn-default" disabled>终态</button>')
+      + `<button class="btn btn-default" id="app-onboard">${icon('book', 14)}生成接入提示词</button>`
+      + `<button class="btn btn-default" id="app-edit">${icon('edit', 14)}编辑资料</button>`
       + (['draft', 'archived'].includes(app.status) ? `<button class="btn btn-danger-ghost" id="app-delete">${icon('trash', 14)}删除</button>` : ''),
   })
 
@@ -234,6 +250,12 @@ async function openAppDetail(id, ctx) {
       }
     }
   }
+
+  const editBtn = drawer.el.querySelector('#app-edit')
+  if (editBtn) editBtn.onclick = () => openAppEdit(app, ctx)
+
+  const onboardBtn = drawer.el.querySelector('#app-onboard')
+  if (onboardBtn) onboardBtn.onclick = () => openAppOnboardPrompt(app)
 
   const deleteBtn = drawer.el.querySelector('#app-delete')
   if (deleteBtn) deleteBtn.onclick = async () => {
@@ -513,8 +535,82 @@ function clip(text, max) {
   return text.length > max ? text.slice(0, max) + '…' : text
 }
 
+/** 编辑应用资料（头像/开发者/描述/访问地址）：与注册白名单同源，PATCH attrs；开发者空选表示清除。 */
+function openAppEdit(app, ctx) {
+  void api.get('/api/apps/developer-options').catch(() => ({ options: [] })).then((devData) => {
+    const devOptions = (devData.options ?? []).map((u) => ({ value: u.id, label: `${u.name}（@${u.username}）`, group: u.orgName || '未分组' }))
+    const modal = openModal({
+      title: `编辑应用资料 · ${app.name}`, wide: true,
+      body: `
+        <div class="form-grid">
+          ${field('头像 / 图标', inputField('icon', { value: String(app.attrs['icon'] ?? '✨'), placeholder: 'emoji 或图片 URL（https://…）' }), { hint: '填图片 http(s) 地址即显示为头像' })}
+          ${field('开发者', searchableSelectField('developerId', devOptions, {
+            value: app.attrs['developerId'] ?? '',
+            placeholder: '搜索姓名 / 账号选择开发者',
+            emptyLabel: '（不指定开发者）',
+          }))}
+          ${field('访问地址', inputField('url', { value: String(app.attrs['url'] ?? ''), placeholder: 'https://…' }), { full: true })}
+          ${field('描述', textareaField('description', { rows: 2, value: app.attrs['description'] ?? '' }), { required: true, full: true })}
+        </div>`,
+      foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>保存</button>',
+    })
+    modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+    mountSearchableSelects(modal.el)
+    modal.el.querySelector('[data-ok]').onclick = async () => {
+      const data = collectForm(modal.body)
+      const attrs = { developerId: data.developerId ?? '' }
+      if (String(data.icon ?? '').trim()) attrs.icon = String(data.icon).trim()
+      if (String(data.url ?? '').trim()) attrs.url = String(data.url).trim()
+      if (String(data.description ?? '').trim()) attrs.description = String(data.description).trim()
+      try {
+        await api.patch(`/api/apps/${app.id}`, { attrs })
+        toast('应用资料已更新'); modal.close(); openAppDetail(app.id, ctx)
+      } catch (error) { toast(error.message, 'error') }
+    }
+  })
+}
+
+/** 生成接入提示词：注册同款模板由平台侧生成（单一事实源）；可选轮换机器凭证（旧 secret 失效）以携带完整凭证。 */
+function openAppOnboardPrompt(app) {
+  const modal = openModal({
+    title: `生成接入提示词 · ${app.name}`,
+    body: `
+      <div class="muted-box mb-14" style="display:flex;gap:8px;line-height:1.8">${icon('info', 15)}<span>按<b>注册同款模板</b>生成全文（换牌 → 接入验证 → SSO 打通 → 计量）。<br>
+      <b>重新生成密钥并生成</b>：提示词携带完整 client_secret，<b>旧 secret 立即失效</b>——首次接入或密钥丢失时选这个；<br>
+      <b>仅生成（不轮换）</b>：仅含 client_id，secret 部分为占位，适合只想重看接入步骤的场景。</span></div>`,
+    foot: `
+      <button class="btn btn-default" data-cancel>取消</button>
+      <button class="btn btn-default" data-plain>仅生成（不轮换）</button>
+      <button class="btn btn-primary" data-rotate>重新生成密钥并生成</button>`,
+  })
+  const generate = async (rotate) => {
+    try {
+      const result = await api.post(`/api/apps/${app.id}/onboarding-prompt`, { rotate })
+      modal.close()
+      openOnboardingModal({
+        title: `接入提示词 · ${app.name}${rotate ? '（密钥已重新生成）' : ''}`,
+        resourceLabel: 'AI 应用',
+        resource: app,
+        credential: result.credential,
+        metaRows: [
+          ['应用 ID', app.id],
+          ['client_id', result.credential.clientId],
+          ...(result.credential.clientSecret ? [['client_secret', result.credential.clientSecret]] : []),
+        ],
+        guideText: result.prompt,
+      })
+    } catch (error) { toast(error.message, 'error') }
+  }
+  modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+  modal.el.querySelector('[data-plain]').onclick = () => void generate(false)
+  modal.el.querySelector('[data-rotate]').onclick = () => void generate(true)
+}
+
 function openAppCreate(schema, ctx) {
-  void api.get('/api/agents').then((agentData) => {
+  void Promise.all([
+    api.get('/api/agents'),
+    api.get('/api/apps/developer-options').catch(() => ({ options: [] })),
+  ]).then(([agentData, devData]) => {
     const onlineAgents = agentData.agents.filter((a) => a.status === 'online' || a.status === 'trial')
     const modal = openModal({
       title: '注册 AI 应用', wide: true,
@@ -526,10 +622,16 @@ function openAppCreate(schema, ctx) {
             { value: 'web', label: 'Web 应用' }, { value: 'h5', label: 'H5' }, { value: 'miniapp', label: '小程序' },
             { value: 'desktop', label: '桌面端' }, { value: 'api', label: 'API 服务' },
           ]), { required: true })}
-          ${field('图标（emoji）', inputField('icon', { value: '✨' }))}
+          ${field('头像 / 图标', inputField('icon', { value: '✨', placeholder: 'emoji 或图片 URL（https://…）' }), { hint: '填图片 http(s) 地址即显示为头像，否则按 emoji 展示' })}
           ${field('访问地址', inputField('url', { placeholder: 'https://…' }), { full: true, hint: '上线（发布）前必须登记' })}
-          ${field('描述', textareaField('description', { rows: 2 }), { full: true })}
+          ${field('描述', textareaField('description', { rows: 2 }), { required: true, full: true })}
         </div>
+        <div class="card-title mb-8" style="margin-top:8px">归属与编排</div>
+        ${field('开发者', searchableSelectField('developerId', (devData.options ?? []).map((u) => ({
+          value: u.id,
+          label: `${u.name}（@${u.username}）`,
+          group: u.orgName || '未分组',
+        })), { placeholder: '搜索姓名 / 账号选择开发者', emptyLabel: '（不指定，默认注册人）' }), { full: true, hint: '从平台在编用户中选择；不选则默认注册人' })}
         <div class="card-title mb-8" style="margin-top:8px">编排 Agent（依赖拓扑数据源）</div>
         ${onlineAgents.length
           ? field('选择编排 Agent（可多选）', multiSelectField('agentIds', onlineAgents.map((a) => ({
@@ -554,6 +656,7 @@ function openAppCreate(schema, ctx) {
           attrs: {
             appType: data.appType, icon: data.icon, url: data.url, description: data.description,
             riskLevel: data.riskLevel, dataClass: data.dataClass, agentIds,
+            ...(data.developerId ? { developerId: data.developerId } : {}),
           },
           agentIds,
         })

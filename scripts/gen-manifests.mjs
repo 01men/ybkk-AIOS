@@ -195,12 +195,15 @@ const PLUGINS = [
     services: [['appRegistry', 'ctx.appRegistry', '应用注册/编排依赖图（拓扑）/应用层指标/成本穿透/生命周期']],
     events: [
       ['app.registered / app.onlined / app.offlined', 'emit', '应用生命周期'],
+      ['authn.entryticket.redeemed / oidc.authorize.granted', 'on', '订阅：SSO 身份到访自动折算应用 DAU（trackVisit）'],
     ],
     api: [
       'GET/POST /api/apps · GET /api/apps/:id · PATCH /api/apps/:id',
       'POST /api/apps/:id/transition（发布/下架为 L4 审批）',
       'POST /api/apps/:id/metrics-report（应用指标主动上报：PV/UV/DAU/会话/留存，可 --date 补录）',
+      'POST /api/apps/:id/entry-ticket（平台授权直达：一次性入场票据，#entry_ticket 打开应用）',
       'GET /api/apps/:id（含 topology/cost/impact）',
+      '平台侧自动折算：entry-ticket 兑换 / OIDC 发码 → DAU；浏览器 beacon → PV/UV（端点经 console 聚合暴露）',
     ],
     tools: ['app_list', 'app_topology', 'app_metrics', 'app_metrics_report', 'app_cost_breakdown'],
     ui: { routes: ['#/apps'], menus: [{ group: 'AI 资源', items: ['AI 应用'] }] },
@@ -228,7 +231,10 @@ const PLUGINS = [
     dir: 'console', id: 'dsh-plugin-console', label: '管理控制台（接入层）',
     depends: ['dsh-plugin-platform-core', '全部业务插件'], permissions: ['console.login'],
     services: [],
-    events: [['audit.authz.denied', 'emit', '网关越权拒绝（audit 订阅计数告警）']],
+    events: [
+      ['audit.authz.denied', 'emit', '网关越权拒绝（audit 订阅计数告警）'],
+      ['authn.entryticket.redeemed', 'emit', 'entry-ticket 兑换（app 插件订阅 → 应用 DAU 自动折算）'],
+    ],
     api: [
       'POST /api/tools/execute（工具桥：与 dsh ToolRuntime 同一契约）',
       'POST /mcp（平台即 MCP Server：Streamable HTTP，initialize/tools/list/tools/call，Bearer 鉴权 + 工具级权限点）',
@@ -236,6 +242,7 @@ const PLUGINS = [
       'GET /api/assets/inventory（资产台账） · POST /api/assets/healthcheck（健康巡检） · GET /api/assets/report（成本报表）',
       'GET /api/assets/benefit（效益分析：毛利=列表价收入−采购成本，应用关联单位 DAU 成本） · GET /api/assets/retire-reasons（下架分析：弃用/下线原因聚合）',
       'GET /api/skills/usage-heatmap（技能热力图：skill × 日 使用矩阵）',
+      'GET/POST /api/apps/beacon（公开访客埋点：GET 1x1 GIF / POST JSON；?app=&vid=&uid= → PV 累加、UV 去重；IP+应用 60 次/分钟限流）',
       '静态托管 public/ SPA（飞书级控制台）',
     ],
     ui: {
@@ -277,7 +284,8 @@ const PLUGINS = [
       'GET /api/portal/employees # 已上线 Agent=数字员工（门户契约 /employees）',
       'GET /api/portal/solutions # 解决方案（暂无数据源，空数组=门户降级样板）',
       'GET /api/portal/tools # AI 工具地图（暂无数据源，空数组=门户降级样板）',
-      'GET /api/portal/skills # 已上架 Skill（门户契约 /skills）',
+      'GET /api/portal/skills # 已上架 Skill（门户契约 /skills，downloadUrl=公开下载端点）',
+      'GET /api/portal/skills/:id/download # 技能包公开下载（zip 字节直出，登记下载计量与审计）',
       'GET /api/portal/stats # 首页统计 4 卡（门户契约 /stats）',
     ],
     ui: { routes: [], menus: [] },

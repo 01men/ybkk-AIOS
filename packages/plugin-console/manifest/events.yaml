@@ -4,3 +4,6 @@ events:
   - name: audit.authz.denied
     mode: emit
     description: 网关越权拒绝（audit 订阅计数告警）
+  - name: authn.entryticket.redeemed
+    mode: emit
+    description: entry-ticket 兑换（app 插件订阅 → 应用 DAU 自动折算）

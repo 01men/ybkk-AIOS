@@ -2,7 +2,7 @@
 id: dsh-plugin-agent
 version: 1.1.0
 label: Agent 本体
-depends: ['dsh-plugin-platform-core', 'dsh-plugin-resource-core', 'dsh-plugin-authn', 'dsh-plugin-iam', 'dsh-plugin-audit', 'dsh-plugin-usage']
+depends: ['dsh-plugin-platform-core', 'dsh-plugin-resource-core', 'dsh-plugin-authn', 'dsh-plugin-iam', 'dsh-plugin-audit']
 provides:
   services:
     - agentRegistry

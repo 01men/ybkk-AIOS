@@ -16,6 +16,3 @@ events:
   - name: iam.connector.synced
     mode: emit
     description: 三方同步完成
-  - name: nas.authz.cGroupDrift
-    mode: emit
-    description: 动态用户组重算漂移告警（NAS C 关联组任何漂移 / 其余组超阈值；plugin-nas 订阅转告警）

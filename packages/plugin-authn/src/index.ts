@@ -277,8 +277,9 @@ export class AuthnService extends Service {
    * options.purpose='bind' 时用于「已登录账号扫码绑定三方身份」：state 锁定目标 userId，
    * 回调由 GET /api/auth/sso/callback 承接（与登录用途隔离，见 completeSso）。
    * options.configId 指定多主体连接器实例：按其适配器发起授权并记入 state，回调按实例解析。
+   * options.promptConsent=true 时强制 IdP 弹授权确认页（刷新老用户授权快照，见 providers.ts）。
    */
-  async beginSso(provider: string, scene: 'web_qr' | 'h5' | 'in_app', origin?: string, options: { purpose?: 'login' | 'bind'; userId?: string; configId?: string } = {}): Promise<{ authorizeUrl: string | null; state: string }> {
+  async beginSso(provider: string, scene: 'web_qr' | 'h5' | 'in_app', origin?: string, options: { purpose?: 'login' | 'bind'; userId?: string; configId?: string; promptConsent?: boolean } = {}): Promise<{ authorizeUrl: string | null; state: string }> {
     // 多主体：指定 configId 时按配置实例取适配器并校验平台类型一致，否则取该 provider 第一个（旧行为）
     const adapter = options.configId !== undefined
       ? this.ctx.iam.getAuthProviderByConfig(options.configId)
@@ -302,7 +303,7 @@ export class AuthnService extends Service {
       ? this.ctx.iam.connectorConfigById(options.configId)?.callbackUrl
       : this.ctx.iam.connectorConfig(provider)?.callbackUrl)?.trim()
     const redirectUri = configured || (origin ? `${origin.replace(/\/+$/, '')}/api/auth/sso/callback` : '/api/auth/sso/callback')
-    return { authorizeUrl: await adapter.buildAuthorizeUrl(scene, state, redirectUri), state }
+    return { authorizeUrl: await adapter.buildAuthorizeUrl(scene, state, redirectUri, { promptConsent: options.promptConsent ?? false }), state }
   }
 
   /**

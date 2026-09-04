@@ -465,6 +465,9 @@ token:    ${esc(result.token)}</div>`,
     }
   }
 
+  const onboardBtn = drawer.el.querySelector('#ag-onboard')
+  if (onboardBtn) onboardBtn.onclick = () => openAgentOnboardPrompt(agent)
+
   const deleteBtn = drawer.el.querySelector('#ag-delete')
   if (deleteBtn) deleteBtn.onclick = async () => {
     const result = await confirmDialog({
@@ -486,7 +489,44 @@ function footForStatus(agent, ctx) {
   }).join('')
   const deleteBtn = ['draft', 'archived'].includes(agent.status)
     ? `<button class="btn btn-danger-ghost" id="ag-delete">${icon('trash', 14)}删除</button>` : ''
-  return buttons + deleteBtn || '<button class="btn btn-default" disabled>终态（已归档）</button>'
+  const onboardBtn = `<button class="btn btn-default" id="ag-onboard">${icon('book', 14)}生成接入提示词</button>`
+  return buttons + onboardBtn + deleteBtn || '<button class="btn btn-default" disabled>终态（已归档）</button>'
+}
+
+/** 生成 Agent 接入提示词：注册同款模板由平台侧生成；可选轮换机器凭证（旧 secret 失效）以携带完整凭证。与 app 同构。 */
+function openAgentOnboardPrompt(agent) {
+  const modal = openModal({
+    title: `生成接入提示词 · ${agent.name}`,
+    body: `
+      <div class="muted-box mb-14" style="display:flex;gap:8px;line-height:1.8">${icon('info', 15)}<span>按<b>注册同款模板</b>生成全文（换牌 → 运营数据提报 → 计量 → NAS 数据权限）。<br>
+      <b>重新生成密钥并生成</b>：提示词携带完整 client_secret，<b>旧 secret 立即失效</b>——首次接入或密钥丢失时选这个；<br>
+      <b>仅生成（不轮换）</b>：仅含 client_id，secret 部分为占位。</span></div>`,
+    foot: `
+      <button class="btn btn-default" data-cancel>取消</button>
+      <button class="btn btn-default" data-plain>仅生成（不轮换）</button>
+      <button class="btn btn-primary" data-rotate>重新生成密钥并生成</button>`,
+  })
+  const generate = async (rotate) => {
+    try {
+      const result = await api.post(`/api/agents/${agent.id}/onboarding-prompt`, { rotate })
+      modal.close()
+      openOnboardingModal({
+        title: `接入提示词 · ${agent.name}${rotate ? '（密钥已重新生成）' : ''}`,
+        resourceLabel: 'Agent',
+        resource: agent,
+        credential: result.credential,
+        metaRows: [
+          ['Agent ID', agent.id],
+          ['client_id', result.credential.clientId],
+          ...(result.credential.clientSecret ? [['client_secret', result.credential.clientSecret]] : []),
+        ],
+        guideText: result.prompt,
+      })
+    } catch (error) { toast(error.message, 'error') }
+  }
+  modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+  modal.el.querySelector('[data-plain]').onclick = () => void generate(false)
+  modal.el.querySelector('[data-rotate]').onclick = () => void generate(true)
 }
 
 async function openAgentCreate(schema, ctx) {

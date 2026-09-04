@@ -16,8 +16,10 @@
    这一步拿到的是平台运维机器凭证（机器令牌 2 小时有效；插件侧自动续换，
    直接走 REST 时收到 401 过期就重新换牌一次再重试）。
    应用注册（app_ 开头 id）是另一回事：本应用尚未注册时先向我确认注册信息，不要自行换名重复注册。
-   应用 attrs 为白名单制（description/appType/url/channels/publishVersion/riskLevel/dataClass 等，
-   没有 tags 字段）：白名单外字段（含 version）静默丢弃——返回 200 但不落库；版本号用 publishVersion。
+   应用 attrs 为白名单制（description/appType/icon/url/channels/publishVersion/riskLevel/dataClass/
+   developerName/developerId/agentIds，没有 tags 字段）：白名单外字段（含 version）静默丢弃——返回 200
+   但不落库；版本号用 publishVersion；icon 填 emoji 或图片 http(s) 地址（展示为应用头像）；
+   开发者用 developerId（平台用户 ID，校验存在并自动回填 developerName）或直接给 developerName。
 
 2. 登录打通：按 http://192.168.0.7:7300/docs/app-sso-integration.md 接入 OIDC
    （授权码 + 强制 PKCE S256，redirect_uri 必须与控制台登记值完全一致），身份以宿主账号体系（sub）为准。

@@ -32,6 +32,11 @@ export function portalEnabled(): boolean {
   return String(process.env.PORTAL_SYNC ?? 'on').trim().toLowerCase() !== 'off'
 }
 
+/** 平台对外基址：拼进 downloadUrl 等需要绝对地址的字段（反代/换址时环境变量覆盖）。 */
+export function portalPublicBase(): string {
+  return (process.env.PORTAL_PUBLIC_BASE ?? 'http://192.168.0.7:7300').trim().replace(/\/+$/, '')
+}
+
 const ENDPOINTS = ['apps', 'employees', 'solutions', 'tools', 'skills', 'stats'] as const
 
 export class PortalFeedService extends Service {
@@ -57,7 +62,41 @@ export class PortalFeedService extends Service {
     }
   }
 
+  /**
+   * 已上架技能包字节（门户公开下载，downloadUrl 的应答端）。
+   * 仅 status=published 的当前已发布版本可取；经 skillHub.download 登记下载计量
+   * （内部自带容错），再取与 NAS 上架产物同源的 zip 字节。
+   */
+  skillPackage(skillId: string): { buffer: Buffer; filename: string } | undefined {
+    try {
+      const skill = this.ctx.skillHub.skills().get(skillId)
+      if (!skill || skill.status !== 'published') return undefined
+      const version = skill.currentVersion
+      const published = skill.versions.find((item) => item.version === version && item.status === 'published')
+      if (!published) return undefined
+      const pkg = this.ctx.skillHub.packageOf(skillId, version)
+      try {
+        this.ctx.skillHub.download(skillId, version, { id: 'portal', name: '企业门户（匿名拉取）' })
+      } catch {
+        // 下载计量失败不阻断取包
+      }
+      try {
+        this.ctx.audit.record({
+          type: 'invoke', actorType: 'system', actorId: 'portal-feed', actorName: '门户数据通道',
+          action: 'portal.skill.download', resourceType: 'skill', resourceId: skillId, resourceName: skill.name,
+          result: 'ok', detail: `门户公开下载：version=${version} bytes=${pkg.buffer.length}（免鉴权内网通道）`,
+        })
+      } catch {
+        // 留痕失败不阻断下载
+      }
+      return { buffer: pkg.buffer, filename: pkg.filename }
+    } catch {
+      return undefined
+    }
+  }
+
   private mappingCtx(): PortalMappingContext {
+    const prefix = portalPrefix()
     return {
       deptName: (orgId) => {
         try { return this.ctx.iam.orgs().get(orgId)?.name ?? '' } catch { return '' }
@@ -65,6 +104,7 @@ export class PortalFeedService extends Service {
       skillName: (skillId) => {
         try { return this.ctx.skillHub.skills().get(skillId)?.name ?? skillId } catch { return skillId }
       },
+      skillDownloadUrl: (skillId) => `${portalPublicBase()}${prefix}/skills/${skillId}/download`,
       hideConfidential: String(process.env.PORTAL_HIDE_CONFIDENTIAL ?? '') === '1',
     }
   }
@@ -147,13 +187,46 @@ export function apply(ctx: Context) {
         respond(exchange, 405, { code: 40500, message: '门户契约为只读 GET，不支持该方式', data: null }, headers)
         return true
       }
+      // 技能包公开下载（downloadUrl 的应答端）：zip 字节直出，非 JSON 契约
+      const downloadMatch = exchange.path.slice(prefix.length).match(/^\/skills\/([^/]+)\/download$/)
+      if (downloadMatch) {
+        const pkg = service.skillPackage(decodeURIComponent(downloadMatch[1]!))
+        if (!pkg) {
+          respond(exchange, 404, { code: 40400, message: '技能不存在或未上架，无可下载包', data: null }, headers)
+          return true
+        }
+        try {
+          if (!exchange.res.headersSent) {
+            // HTTP 头仅允许 ISO-8859-1：ASCII 兜底名（非 ASCII 字符替换为 _）+ RFC 5987 UTF-8 扩展名
+            const asciiName = pkg.filename.replace(/[^\x20-\x7E]/g, '_').replace(/"/g, "'")
+            exchange.res.writeHead(200, {
+              'content-type': 'application/zip',
+              'content-length': pkg.buffer.length,
+              'content-disposition': `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(pkg.filename)}`,
+              'cache-control': 'no-cache',
+              ...headers,
+            })
+            exchange.res.end(pkg.buffer)
+          }
+        } catch (error) {
+          console.error('[portal] 技能包下载应答失败', error)
+          respond(exchange, 500, { code: 50000, message: '技能包读取失败，请稍后重试', data: null }, headers)
+        }
+        return true
+      }
       const tail = exchange.path.slice(prefix.length).replace(/^\/+|\/+$/g, '')
       if (tail === '') {
         // 端点发现：联调自检入口（curl <BASE>/ 应看到端点清单）
         respond(exchange, 200, {
           code: 0,
           message: 'ok',
-          data: { service: 'portal-feed', contract: 'api.md v1.0', endpoints: ENDPOINTS, generatedAt: new Date().toISOString() },
+          data: {
+            service: 'portal-feed',
+            contract: 'api.md v1.0',
+            endpoints: ENDPOINTS,
+            subResources: ['skills/:id/download（技能包公开下载，即 skills[].downloadUrl）'],
+            generatedAt: new Date().toISOString(),
+          },
         }, headers)
         return true
       }

@@ -3,19 +3,16 @@ plugin: dsh-plugin-agent
 base: /api
 endpoints:
   - GET/POST /api/agents · GET /api/agents/:id · PATCH /api/agents/:id
-  - POST /api/agents/:id/metrics-report（运营数据提报：dau/sessions/userIds·uniqueUsers，接入义务）
   - POST /api/agents/:id/transition（L4 走审批）
   - POST/DELETE /api/agents/:id/bindings[/:userId]
   - POST /api/agents/:id/obo-token（on-behalf-of）
-  - POST /api/agents/:id/entry-ticket（平台授权直达：一次性入场票据，owner/绑定用户/管理员可领）
 tools:
   - agent_list
   - agent_get
   - agent_offline
   - agent_metrics
-  - agent_metrics_report
   - agent_bind_user
 services:
   - key: agentRegistry
     access: ctx.agentRegistry
-    description: 注册（颁发机器凭证）/绑定用户/监测归集（MCP 网关 mcp.invoked + usage.recorded 回灌双口径，防双计）/运营数据提报/生命周期 L4 + on-behalf-of
+    description: 注册（颁发机器凭证）/绑定用户/监测归集/生命周期 L4 + on-behalf-of

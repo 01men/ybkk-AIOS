@@ -1,15 +1,11 @@
 # 插件声明：id、版本、依赖与权限点（插件标准解剖结构）
 id: dsh-plugin-nas
-version: 1.2.0
+version: 1.1.0
 label: NAS 文件存储
 depends: ['dsh-plugin-platform-core', 'dsh-plugin-resource-core', 'dsh-plugin-iam', 'dsh-plugin-audit']
 provides:
   services:
     - nasRegistry
-    - nasAuthz
 permissions:
   - nas.read
   - nas.write
-  - nas.authz.check
-  - nas.authz.read
-  - nas.authz.write

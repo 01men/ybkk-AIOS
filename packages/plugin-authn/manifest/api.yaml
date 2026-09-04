@@ -7,7 +7,6 @@ endpoints:
   - GET/POST /api/authn/principals · PATCH /api/authn/principals/:id（scopes 调整，联动吊销令牌）
   - POST /api/authn/principals/:id/disable|enable|rotate-secret（轮换：旧值即废，新值仅一次返回）
   - GET/POST /api/authn/tokens · DELETE /api/authn/tokens/:jti · POST /api/authn/rotate-secret
-  - POST /api/authn/entry-tickets/redeem（公开：平台授权直达一次性入场票据兑换身份，#entry_ticket 协作）
 tools:
   - authn_token_issue
   - authn_token_revoke
@@ -19,6 +18,3 @@ services:
   - key: authn
     access: ctx.authn
     description: 双轨身份（人/机器）+ 令牌签发校验吊销 + on-behalf-of act 链
-  - key: entryTickets
-    access: ctx.entryTickets
-    description: 平台授权直达 entry-ticket（一次性 + 短时 + 审计留痕，agent/app 通用）

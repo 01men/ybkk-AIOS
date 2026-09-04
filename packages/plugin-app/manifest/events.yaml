@@ -4,3 +4,6 @@ events:
   - name: app.registered / app.onlined / app.offlined
     mode: emit
     description: 应用生命周期
+  - name: authn.entryticket.redeemed / oidc.authorize.granted
+    mode: on
+    description: 订阅：SSO 身份到访自动折算应用 DAU（trackVisit）

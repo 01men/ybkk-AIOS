@@ -529,6 +529,8 @@ const proc = spawn(process.execPath, ['src/main.ts', '--port', String(PORT), '--
     DSH_UPDATE_AUTO_CHECK: 'off',
     // OIDC 授权请求 TTL 压到 2 秒：过期路径可在自测内确定性验证（正常流程毫秒级完成不受影响）
     OIDC_AUTHREQ_TTL_SECONDS: '2',
+    // 门户 downloadUrl 生成基址指向自测实例：门户技能包下载断言可直连验证
+    PORTAL_PUBLIC_BASE: `http://127.0.0.1:${PORT}`,
   },
 })
 proc.stderr.on('data', (chunk) => process.stderr.write(`\x1b[90m[server] ${chunk}\x1b[0m`))
@@ -1020,6 +1022,38 @@ try {
   check('PV/UV 口径上报（首日写入）', appReportPv.ok && appReportPv.data.pv === 500 && appReportPv.data.uv === 260 && appReportPv.data.dau === 888)
   const appReportPv2 = await api('POST', `/api/apps/${anyApp.id}/metrics-report`, { token: admin, body: { pv: 120, uv: 300 } })
   check('PV 同日累加 / UV 同日取最大（DAU 800 不覆盖 888）', appReportPv2.ok && appReportPv2.data.pv === 620 && appReportPv2.data.uv === 300 && appReportPv2.data.dau === 888)
+
+  // 平台侧指标自动折算（指标口径补全）：浏览器 beacon → PV/UV；entry-ticket 兑换 / OIDC 发码 → DAU
+  section('平台侧指标自动折算（beacon PV/UV + SSO 到访 DAU）')
+  const autoAppCreate = await api('POST', '/api/apps', { token: admin, body: { name: '指标自动折算验收', attrs: { description: 'beacon PV/UV 与 SSO DAU 自动折算验收', appType: 'web', riskLevel: 'low', dataClass: 'internal' } } })
+  check('折算验收应用创建', autoAppCreate.ok && Boolean(autoAppCreate.data?.app?.id), JSON.stringify(autoAppCreate.error))
+  const autoAppId = autoAppCreate.data.app.id
+  const autoMetrics = async () => (await api('GET', `/api/apps/${autoAppId}`, { token: admin })).data.metrics
+  const vidA = 'selftest-vid-aaaa-0903'
+  const vidB = 'selftest-vid-bbbb-0903'
+  const beaconGif = await rawReq('GET', `/api/apps/beacon?app=${autoAppId}&vid=${vidA}`)
+  check('beacon GET 免鉴权：200 + 1x1 GIF + no-store', beaconGif.status === 200 && beaconGif.headers['content-type'].includes('image/gif') && String(beaconGif.headers['cache-control']).includes('no-store') && beaconGif.body.startsWith('GIF8'), JSON.stringify({ status: beaconGif.status, ct: beaconGif.headers['content-type'] }))
+  await rawReq('GET', `/api/apps/beacon?app=${autoAppId}&vid=${vidA}`)
+  await rawReq('GET', `/api/apps/beacon?app=${autoAppId}&vid=${vidB}`)
+  await rawReq('POST', '/api/apps/beacon', { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ app: autoAppId, vid: vidA }) })
+  const beaconMetrics = await autoMetrics()
+  check('beacon PV 逐次累加 / UV 按 vid 去重（4 次上报 → pv=4 uv=2 dau=0）', beaconMetrics.pv === 4 && beaconMetrics.uv === 2 && beaconMetrics.dau === 0, JSON.stringify(beaconMetrics))
+  const ghostBeacon = await rawReq('GET', '/api/apps/beacon?app=app_ghost&vid=selftest-vid-cccc-0903')
+  check('未知应用 beacon 恒 200 GIF（不泄露应用存在性）', ghostBeacon.status === 200 && ghostBeacon.body === beaconGif.body && ghostBeacon.headers['content-type'] === beaconGif.headers['content-type'])
+  const autoTicket = await api('POST', `/api/apps/${autoAppId}/entry-ticket`, { token: admin, body: {} })
+  const autoRedeem = await rawReq('POST', '/api/authn/entry-tickets/redeem', { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ticket: autoTicket.data.ticket }) })
+  check('entry-ticket 兑换 200（公开端点）', autoRedeem.status === 200)
+  const afterTicket = await autoMetrics()
+  check('entry-ticket 兑换自动折算 DAU（admin 新访客 → dau=1 uv=3）', afterTicket.dau === 1 && afterTicket.uv === 3 && afterTicket.pv === 4, JSON.stringify(afterTicket))
+  const autoSso = await api('POST', `/api/apps/${autoAppId}/sso-client`, { token: admin, body: { redirectUris: ['https://auto-check.example/cb'], consentRequired: false } })
+  check('折算验收应用自助签发 SSO 客户端', autoSso.ok && autoSso.data.clientId.startsWith('oc-'), JSON.stringify(autoSso.error))
+  const autoVerifier = 'selftest-auto-pkce-verifier-43-chars-aaaaaaaaaa'
+  const autoFirst = await rawReq('GET', `/oauth/authorize?${new URLSearchParams({ response_type: 'code', client_id: autoSso.data.clientId, redirect_uri: 'https://auto-check.example/cb', state: 'st-auto', scope: 'openid profile', code_challenge: createHash('sha256').update(autoVerifier).digest('base64url'), code_challenge_method: 'S256' }).toString()}`)
+  const autoReqId = new URLSearchParams(String(autoFirst.headers.location).split('?')[1] ?? '').get('req')
+  const autoApprove = await authorizeConfirm(auditor, autoReqId, true)
+  check('OIDC 授权确认发码（auditor human）', autoApprove.status === 200 && String(autoApprove.result.location).includes('code='), JSON.stringify(autoApprove.result))
+  const afterOidc = await autoMetrics()
+  check('OIDC 发码自动折算 DAU（auditor 新访客 → dau=2 uv=4）', afterOidc.dau === 2 && afterOidc.uv === 4, JSON.stringify(afterOidc))
 
   // dshctl plugin init 脚手架（真实生成文件）
   const { execFile } = await import('node:child_process')
@@ -1851,6 +1885,20 @@ try {
   const agentSelfMeter = await api('POST', '/api/usage/record', { token: selfAgentCc.data.token, body: { org: tenantOrg.data.id, subject: `agent:${selfAgent.id}`, principal: `org:${tenantOrg.data.id}`, resource: 'mcp:real-backend', meters: [{ key: 'tokens', value: 100, unit: 'token' }], idempotency_key: 'test-usage-agent-self-1' } })
   check('Agent 机器令牌自推计量 200（usage.write 生效）', agentSelfMeter.ok && agentSelfMeter.data.pricing.charge_cents === 3)
 
+  // Agent 接入提示词（与 app 同构：rotate 轮换机器凭证携带完整凭证；首行含关键词「提示词」供 connector 触发）
+  const agentPrompt = await api('POST', `/api/agents/${selfAgent.id}/onboarding-prompt`, { token: selfAgentCc.data.token, body: { rotate: true } })
+  check('Agent 接入提示词：凭自身凭证 rotate 生成（含新 secret 与关键词「提示词」）',
+    agentPrompt.ok && agentPrompt.data.rotated === true && agentPrompt.data.prompt.includes('提示词')
+    && Boolean(agentPrompt.data.credential.clientSecret) && agentPrompt.data.prompt.includes(agentPrompt.data.credential.clientSecret),
+    JSON.stringify(agentPrompt.error))
+  const agentPromptCc = await api('POST', '/api/auth/client-credentials', { body: { clientId: agentPrompt.data.credential.clientId, clientSecret: agentPrompt.data.credential.clientSecret } })
+  check('Agent 接入提示词：轮换后新 secret 可换牌', agentPromptCc.ok && Boolean(agentPromptCc.data?.token), JSON.stringify(agentPromptCc.error))
+  // 用换牌后的新令牌复核 agent.write 仍生效（自提报更新资料）
+  const agentPromptSelfPatch = await api('PATCH', `/api/agents/${selfAgent.id}`, { token: agentPromptCc.data.token, body: { attrs: { description: '自测用机器人（提示词轮换后仍可自更新）' } } })
+  check('Agent 接入提示词：轮换后凭新令牌 PATCH 资料 200', agentPromptSelfPatch.ok, JSON.stringify(agentPromptSelfPatch.error))
+  // 轮换已吊销旧令牌：就地刷新 selfAgentCc 的令牌，保证本段后续用例继续持有有效凭证
+  selfAgentCc.data.token = agentPromptCc.data.token
+
   // 调用统计口径补全（2026-08）：usage.recorded 回灌 + 防双计
   const agentMetricsAfterSelfMeter = await api('GET', `/api/agents/${selfAgent.id}`, { token: admin })
   check('防双计①：自推 mcp:* 计量不回灌调用台账（MCP 口径归 McpInvoked，宁缺勿重）',
@@ -1950,6 +1998,36 @@ try {
   const agentOffline = await api('GET', `/api/agents/${selfAgent.id}`, { token: admin })
   check('下线后状态与凭证联动禁用', agentOffline.data.status === 'offline' && agentOffline.data.credential.status === 'disabled')
   void credBefore
+
+  // ================================================================ AI 应用资料字段（头像 URL / 开发者 / 描述）
+  section('AI 应用资料字段（头像 URL / 开发者下拉 / 描述）')
+  const devOptions = await api('GET', '/api/apps/developer-options', { token: ops })
+  check('developer-options：资源管理员（app.* → app.write）可拉取在编用户瘦字段', devOptions.ok && Array.isArray(devOptions.data.options) && devOptions.data.options.length > 0 && devOptions.data.options[0].username !== undefined, JSON.stringify(devOptions.error))
+  const devOption = devOptions.data?.options?.find((u) => u.username === 'dev')
+  check('developer-options：包含演示开发者账号（dev / 陈默）', Boolean(devOption && devOption.name === '陈默'))
+  const appAvatarCreate = await api('POST', '/api/apps', { token: ops, body: { name: '资料字段自测应用', attrs: { description: '头像 / 开发者 / 描述字段验证', appType: 'web', icon: 'https://example.com/avatar.png', riskLevel: 'low', dataClass: 'internal', developerId: devOption.id } } })
+  check('注册应用：icon 接受图片 URL（头像）', appAvatarCreate.ok && appAvatarCreate.data.app.attrs['icon'] === 'https://example.com/avatar.png', JSON.stringify(appAvatarCreate.error))
+  check('注册应用：developerId 校验存在并回填 developerName（displayName 为准）', appAvatarCreate.ok && appAvatarCreate.data.app.attrs['developerId'] === devOption.id && appAvatarCreate.data.app.attrs['developerName'] === '陈默', JSON.stringify(appAvatarCreate.data?.app?.attrs))
+  const appAvatarBad = await api('POST', '/api/apps', { token: ops, body: { name: '非法开发者自测应用', attrs: { description: 'developerId 校验', appType: 'web', riskLevel: 'low', dataClass: 'internal', developerId: 'usr_ghost' } } })
+  check('注册应用：developerId 不存在被拒 400', !appAvatarBad.ok && String(appAvatarBad.error?.message ?? '').includes('开发者不存在'), JSON.stringify(appAvatarBad.error))
+  const appAvatarPatch = await api('PATCH', `/api/apps/${appAvatarCreate.data.app.id}`, { token: ops, body: { attrs: { icon: '🧩', developerId: '' } } })
+  check('更新应用：icon 可改；developerId 空串清除开发者', appAvatarPatch.ok && appAvatarPatch.data.attrs['icon'] === '🧩' && appAvatarPatch.data.attrs['developerName'] === '' && appAvatarPatch.data.attrs['developerId'] === '', JSON.stringify(appAvatarPatch.error ?? appAvatarPatch.data?.attrs))
+  const appAvatarNameOnly = await api('PATCH', `/api/apps/${appAvatarCreate.data.app.id}`, { token: ops, body: { attrs: { developerName: '外部协作开发者' } } })
+  check('更新应用：developerName 支持自由文本快照（外部开发者场景）', appAvatarNameOnly.ok && appAvatarNameOnly.data.attrs['developerName'] === '外部协作开发者', JSON.stringify(appAvatarNameOnly.error))
+
+  // 接入提示词（注册同款模板平台侧生成；rotate 轮换机器凭证携带完整凭证；外部推送方按关键词「提示词」触发）
+  const promptRotated = await api('POST', `/api/apps/${appAvatarCreate.data.app.id}/onboarding-prompt`, { token: ops, body: { rotate: true } })
+  check('接入提示词：rotate 生成完整提示词（含新 clientSecret 与关键词「提示词」）',
+    promptRotated.ok && promptRotated.data.rotated === true && promptRotated.data.prompt.includes('提示词')
+    && Boolean(promptRotated.data.credential.clientSecret) && promptRotated.data.prompt.includes(promptRotated.data.credential.clientSecret),
+    JSON.stringify(promptRotated.error))
+  const promptCc = await api('POST', '/api/auth/client-credentials', { body: { clientId: promptRotated.data.credential.clientId, clientSecret: promptRotated.data.credential.clientSecret } })
+  check('接入提示词：轮换后的新 secret 可正常换牌（旧值已吊销）', promptCc.ok && Boolean(promptCc.data?.token), JSON.stringify(promptCc.error))
+  const promptPlain = await api('POST', `/api/apps/${appAvatarCreate.data.app.id}/onboarding-prompt`, { token: ops, body: {} })
+  check('接入提示词：不轮换生成（含 client_id 与占位说明，不含 secret 明文）',
+    promptPlain.ok && promptPlain.data.rotated === false && promptPlain.data.prompt.includes(promptPlain.data.credential.clientId)
+    && promptPlain.data.prompt.includes('重新生成密钥') && !promptPlain.data.prompt.includes('client_secret：cs_'),
+    JSON.stringify(promptPlain.error))
 
   // ================================================================ AI 应用 ↔ SSO 打通（MVP 闭环）
   section('AI 应用 ↔ SSO 打通（注册 → 签发 → 门禁双点 → 跳转登录）')
@@ -2051,6 +2129,10 @@ try {
   check('钉钉身份完整浏览器流（sso 登录 → consent → token → userinfo 身份一致）',
     dingFirst.status === 302 && dingApprove.status === 200 && dingTokens.access_token?.split('.').length === 3
     && dingUserInfo.sub === dingSso.data.user.id && dingUserInfo.preferred_username === dingSso.data.user.username)
+
+  // 平台侧自动折算回归（真实链路汇点）：ticket 兑换（admin）+ OIDC 发码（ops、钉钉用户）→ 应用 DAU/UV 自动落账
+  const mvpMetrics = (await api('GET', `/api/apps/${ssoAppId}`, { token: admin })).data.metrics
+  check('SSO 到访自动折算（ticket admin + 发码 ops/钉钉 → dau=3 uv=3，同用户重复授权去重）', mvpMetrics.dau === 3 && mvpMetrics.uv === 3, JSON.stringify(mvpMetrics))
 
   // app.updated 联动：应用改名 → 客户端名称同步
   await api('PATCH', `/api/apps/${ssoAppId}`, { token: ops, body: { name: 'SSO 自测应用 v2' } })
@@ -3559,8 +3641,15 @@ try {
     portalEmployees.status === 200 && portalEmployees.headers['access-control-allow-origin'] === 'http://192.168.0.8:8443'
     && Array.isArray(portalEmployees.body.data) && portalEmployees.body.data.some((item) => item.id === targetAgent.id && item.avatar && typeof item.skills === 'string'))
   const portalSkills = await portalJson('/skills')
-  check('/skills：已上架 Skill 契约（tag/version/downloadUrl 字段齐全）',
-    portalSkills.status === 200 && Array.isArray(portalSkills.body.data) && portalSkills.body.data.every((item) => typeof item.downloadUrl === 'string' && typeof item.version === 'string'))
+  check('/skills：已上架 Skill 契约（downloadUrl 为门户公开下载端点绝对地址）',
+    portalSkills.status === 200 && Array.isArray(portalSkills.body.data) && portalSkills.body.data.length >= 1
+    && portalSkills.body.data.every((item) => /^https?:\/\/.+\/api\/portal\/skills\/.+\/download$/.test(item.downloadUrl)))
+  const portalSkillDl = await rawReq('GET', new URL(portalSkills.body.data[0].downloadUrl).pathname)
+  check('downloadUrl 免鉴权可直接下载（200 + zip 魔数 PK + attachment 头）',
+    portalSkillDl.status === 200 && String(portalSkillDl.headers['content-type']).includes('zip')
+    && portalSkillDl.body.startsWith('PK') && String(portalSkillDl.headers['content-disposition']).includes('attachment'), JSON.stringify({ status: portalSkillDl.status, type: portalSkillDl.headers['content-type'] }))
+  const portalDlMissing = await portalJson('/skills/skl_not_exist/download')
+  check('未上架/未知技能下载 404 契约错误', portalDlMissing.status === 404 && portalDlMissing.body.code === 40400)
   const portalStats = await portalJson('/stats', { origin: portalOrigin })
   check('/stats：恰 4 卡且 value 为字符串（契约明确非数值）', portalStats.body.data.length === 4 && portalStats.body.data.every((item) => typeof item.value === 'string' && item.unit !== undefined && item.label !== undefined))
   check('/stats 口径：已上线应用计数与 /apps 一致', Number(portalStats.body.data[0].value) === portalAppsAfter.body.data.length)

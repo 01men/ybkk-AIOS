@@ -15,6 +15,7 @@ import {
 } from '../../platform-core/src/index.ts'
 import * as agentTools from './tools.ts'
 import { AGENT_TYPE_SPEC } from './schema.ts'
+import { buildAgentOnboardingPrompt, type AgentOnboardingCredential } from './onboarding.ts'
 
 // ---------------------------------------------------------------------------
 // 数据模型（Agent 专属扩展记录）
@@ -163,6 +164,32 @@ export class AgentRegistryService extends Service {
 
   machinePrincipal(agentId: string) {
     return this.ctx.authn.principals().findOne((item) => item.refType === 'agent' && item.refId === agentId)
+  }
+
+  /**
+   * 生成 Agent 接入提示词（注册同款模板，平台侧单一事实源，与 app 同构）：
+   * rotate=true 轮换机器凭证 secret（旧值立即失效）并随提示词返回；rotate=false 仅含 client_id。
+   */
+  buildOnboardingPrompt(agentId: string, origin: string, opts: { rotate?: boolean } = {}): {
+    agentName: string
+    prompt: string
+    credential: AgentOnboardingCredential
+    rotated: boolean
+  } {
+    const agent = this.ctx.resourceCore.get('agent', agentId)
+    if (!agent) throw new Error(`Agent 不存在：${agentId}`)
+    const principal = this.machinePrincipal(agentId)
+    if (!principal) throw new Error(`Agent 机器凭证不存在（可能已被禁用或删除），无法生成接入提示词`)
+    let credential: AgentOnboardingCredential
+    let rotated = false
+    if (opts.rotate) {
+      const next = this.ctx.authn.rotateMachineCredential(principal.id)
+      credential = { clientId: next.principal.clientId, clientSecret: next.clientSecret }
+      rotated = true
+    } else {
+      credential = { clientId: principal.clientId }
+    }
+    return { agentName: agent.name, prompt: buildAgentOnboardingPrompt(agent, credential, origin), credential, rotated }
   }
 
   /** 用户绑定：记录"哪些用户可使用该 Agent"，使用即授权留痕。 */

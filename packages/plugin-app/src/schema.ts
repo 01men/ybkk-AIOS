@@ -17,7 +17,9 @@ export const APP_TYPE_SPEC: ResourceTypeSpec = {
     ],
     fields: [
       { key: 'description', label: '描述', type: 'text', group: 'basic', required: true },
-      { key: 'icon', label: '图标', type: 'string', group: 'basic', defaultValue: '✨' },
+      { key: 'icon', label: '头像 / 图标', type: 'string', group: 'basic', defaultValue: '✨', placeholder: 'emoji 或图片 URL（https://…）', hint: '一个 emoji，或一张图片的 http(s) 地址（控制台与卡片按 URL 渲染头像）' },
+      { key: 'developerName', label: '开发者', type: 'string', group: 'basic', hint: '开发者姓名；传 developerId 时以平台账号 displayName 为准' },
+      { key: 'developerId', label: '开发者 ID', type: 'string', group: 'basic', hint: '平台用户 ID；注册/更新时校验存在并回填开发者姓名' },
       { key: 'appType', label: '应用类型', type: 'enum', group: 'app', required: true, options: [
         { value: 'web', label: 'Web 应用' },
         { value: 'h5', label: 'H5' },

@@ -315,6 +315,11 @@ NAS 成为第六类受管资产（FS 文件存储类），Skill 上架产物可�
   跨机部署与中文 slug 兼容：skill 资源键用资产 ID（中文名 slug 含非 ASCII，过不了 resource 校验）。
 - **应用指标 PV/UV 口径**：`metrics-report` / `app_metrics_report` / `app report` 三端新增 `--pv/--uv`
   （同日 PV 累加、UV 取最大，与 DAU 同语义）；应用详情指标页展示 PV 柱图与 UV/DAU 双线。
+- **访客指标平台侧自动折算（指标口径补全）**：entry-ticket 兑换 / OIDC 发码经事件总线自动折算应用
+  **DAU**（按平台 `sub` 同日去重），零改造即有数据；新增**公开访客埋点 beacon** `GET/POST /api/apps/beacon`
+  （`?app=&vid=&uid=`，1x1 GIF / JSON，CORS `*`，未知应用不泄露存在性，IP+应用 60 次/分钟限流）——
+  应用一行埋点即得 **PV/UV**（PV 逐次累加、UV 按 `vid` 同日去重），与主动上报经 max/累加语义自然合并
+  （详见 [docs/app-sso-integration.md §十一](docs/app-sso-integration.md)）。
 - **效益分析**：`GET /api/assets/benefit`——按资产聚合 列表价收入/采购成本/**毛利**，应用类资产关联
   窗口 DAU 派生**单位 DAU 成本**（指标×成本首次打通）；「资产运营」页新增效益表 + 主体分摊
   （谁在花钱，byPrincipal 前端首次渲染）。

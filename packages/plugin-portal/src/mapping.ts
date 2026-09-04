@@ -86,10 +86,12 @@ export interface PortalSkillSource {
   versions: Array<{ status: string; publishedAt?: string }>
 }
 
-/** 映射上下文：跨域服务（组织名/Skill 名）经回调注入，映射函数保持无依赖可测。 */
+/** 映射上下文：跨域服务（组织名/Skill 名/下载地址）经回调注入，映射函数保持无依赖可测。 */
 export interface PortalMappingContext {
   deptName: (orgId: string) => string
   skillName: (skillId: string) => string
+  /** 技能包公开下载地址（门户免鉴权下载端点）。 */
+  skillDownloadUrl: (skillId: string) => string
   /** 机密应用不出门户（PORTAL_HIDE_CONFIDENTIAL=1 开启，默认关闭）。 */
   hideConfidential: boolean
 }
@@ -183,8 +185,8 @@ export function mapSkills(skills: PortalSkillSource[], mctx: PortalMappingContex
         desc: s(skill.summary) || s(skill.description),
         dept: mctx.deptName(skill.orgId) || s(skill.authorName),
         version: s(skill.currentVersion),
-        // Skill 包下载走平台鉴权通道，门户侧暂无公开直链（契约空值约定）
-        downloadUrl: '',
+        // 已上架技能包的公开下载端点（门户免鉴权可下载，平台侧登记下载计量）
+        downloadUrl: mctx.skillDownloadUrl(s(skill.id)),
         launchDate: /^\d{4}-\d{2}-\d{2}/.test(publishedAt) ? publishedAt.slice(0, 10) : '',
       }
     })

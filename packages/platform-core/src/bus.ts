@@ -60,6 +60,7 @@ export const PlatformEvents = {
   AppArchived: 'app.archived',
   OidcAuthorizeGranted: 'oidc.authorize.granted',
   OidcAuthorizeDenied: 'oidc.authorize.denied',
+  EntryTicketRedeemed: 'authn.entryticket.redeemed',
   ApprovalCreated: 'approval.created',
   ApprovalDecided: 'approval.decided',
   AlertFired: 'audit.alert.fired',

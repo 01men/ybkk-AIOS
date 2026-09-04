@@ -203,3 +203,41 @@ GET /api/iam/roster          （Bearer 机器凭证令牌，须含 iam.roster.re
 
 > 与 OIDC 的分工记忆：**登录用人（§一~九）管"一个人来"，名册（本节）管"全部人有"**；
 > 两者都以用户 `id`/`sub` 为唯一关联键，应用内建一张 `sub → 业务角色` 映射表即可把两条通道拼起来。
+
+## 十一、访客指标自动折算（平台侧）与 beacon 埋点（应用侧）
+
+平台侧已把「SSO 身份到访」与「页面浏览」自动折算进应用指标，接入方**不做任何事也能得到 DAU**；
+做一行 beacon 埋点可再得到 PV/UV。
+
+### 平台侧自动折算（零改造）
+
+| 到访行为 | 折算 | 口径 |
+|----------|------|------|
+| entry-ticket 兑换（§九） | DAU +1 | 按平台 `sub` 同日去重 |
+| OIDC 发码（授权页确认，§一~二） | DAU +1 | 按平台 `sub` 同日去重 |
+| 浏览器 beacon（下述） | PV +1 / UV +1 | PV 逐次累加；UV 按 `vid` 同日去重 |
+
+同日多次到访集合只增不减，经 `recordUsage` 的 max/累加语义与接入方主动上报
+（`POST /api/apps/:id/metrics-report`）自然合并，互不覆盖。
+
+### 应用侧 beacon（一行埋点，免机器鉴权、免 secret）
+
+页面加载/SPA 路由切换时上报一次即可（`<appId>` 为应用 ID，即 `app_` 前缀资源 ID）：
+
+```html
+<!-- 方式一：<img> 像素（最简，天然跨域） -->
+<img src="http://<平台地址>/api/apps/beacon?app=<appId>&vid=<访客ID>" hidden alt="">
+```
+
+```js
+// 方式二：fetch / sendBeacon（POST JSON；vid 缺省时平台按 IP+UA 哈希兜底）
+const vid = localStorage['rq:vid'] ??= crypto.randomUUID().replace(/-/g, '') // 8-64 位 base64url
+navigator.sendBeacon?.('/api/apps/beacon',
+  new Blob([JSON.stringify({ app: '<appId>', vid })], { type: 'application/json' }))
+```
+
+- 端点公开（PUBLIC_PATHS），返回恒为 1x1 GIF / `{ok:true}`——未知应用同样响应，不泄露应用存在性；
+- `vid`：8-64 位 base64url 字符串，建议 `localStorage` 持久随机 ID（同一浏览器同日只计一次 UV）；
+- 可选 `uid`：应用已知平台身份（如 entry-ticket 兑换到的 `sub`）时携带，帮助 UV/DAU 口径对齐；
+- 防滥用：同 IP 同应用 60 次/分钟内计数，超限静默忽略（响应照常，不影响页面）；
+- CORS：`*` 放行（GET/POST/OPTIONS），任意 entryUrl 的前端均可直报。

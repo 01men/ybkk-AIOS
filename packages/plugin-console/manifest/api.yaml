@@ -8,6 +8,7 @@ endpoints:
   - GET /api/assets/inventory（资产台账） · POST /api/assets/healthcheck（健康巡检） · GET /api/assets/report（成本报表）
   - GET /api/assets/benefit（效益分析：毛利=列表价收入−采购成本，应用关联单位 DAU 成本） · GET /api/assets/retire-reasons（下架分析：弃用/下线原因聚合）
   - GET /api/skills/usage-heatmap（技能热力图：skill × 日 使用矩阵）
+  - GET/POST /api/apps/beacon（公开访客埋点：GET 1x1 GIF / POST JSON；?app=&vid=&uid= → PV 累加、UV 去重；IP+应用 60 次/分钟限流）
   - 静态托管 public/ SPA（飞书级控制台）
 
 services:

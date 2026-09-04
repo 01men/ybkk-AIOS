@@ -44,8 +44,10 @@ export interface IdentityProviderAdapter {
   readonly label: string
   /** 当前是否为降级 mock 模式（IdP 对外卖点禁止使用 mock 数据）。 */
   readonly mock: boolean
-  /** 构造授权跳转 URL 或二维码内容（in_app 场景可返回 null，由前端 SDK 取 code）。 */
-  buildAuthorizeUrl(scene: LoginScene, state: string, redirectUri: string): Promise<string | null>
+  /** 构造授权跳转 URL 或二维码内容（in_app 场景可返回 null，由前端 SDK 取 code）。
+   *  options.promptConsent=true 时强制弹授权确认页：应用新增权限点后，
+   *  老用户的历史授权快照不含新 scope，需重新授权一次才能刷新。 */
+  buildAuthorizeUrl(scene: LoginScene, state: string, redirectUri: string, options?: { promptConsent?: boolean }): Promise<string | null>
   /** code → 平台令牌。code 单次消费，失败/过期抛 ProviderAuthError。 */
   exchangeCode(code: string): Promise<ProviderTokenSet>
   /** 平台令牌 → 原始档案。 */
@@ -89,9 +91,10 @@ export class DingTalkAuthAdapter implements IdentityProviderAdapter {
   readonly mock = true
   private consumedCodes = new Map<string, number>()
 
-  async buildAuthorizeUrl(scene: LoginScene, state: string, redirectUri: string): Promise<string | null> {
+  async buildAuthorizeUrl(scene: LoginScene, state: string, redirectUri: string, _options?: { promptConsent?: boolean }): Promise<string | null> {
     if (scene === 'in_app') return null
     // 不带 prompt=consent：已授权过的用户（浏览器持有钉钉会话）可静默通过，缩短回跳链路
+    // （mock 无真实授权页，promptConsent 仅作签名兼容，不产生行为差异）
     const params = new URLSearchParams({
       client_id: 'demo-app-key',
       redirect_uri: redirectUri,
@@ -157,10 +160,12 @@ export class RealDingTalkAuthAdapter implements IdentityProviderAdapter {
     return this.credentials.apiBase ?? 'https://api.dingtalk.com'
   }
 
-  async buildAuthorizeUrl(scene: LoginScene, state: string, redirectUri: string): Promise<string | null> {
+  async buildAuthorizeUrl(scene: LoginScene, state: string, redirectUri: string, options?: { promptConsent?: boolean }): Promise<string | null> {
     if (scene === 'in_app') return null
-    // 不带 prompt=consent：已授权过的用户（浏览器持有钉钉会话）可静默通过，缩短回跳链路；
-    // 组织归属由用户在钉钉「选择你加入的组织」页一次性选定，平台侧不再要求预选主体
+    // 默认不带 prompt=consent：已授权过的用户（浏览器持有钉钉会话）可静默通过，缩短回跳链路；
+    // 组织归属由用户在钉钉「选择你加入的组织」页一次性选定，平台侧不再要求预选主体。
+    // promptConsent=true 时强制弹授权确认页：应用新增权限点后老用户的历史授权快照不含新 scope，
+    // 静默换到的 userAccessToken 调 users/me 会 403（AccessTokenPermissionDenied），需重授权一次刷新。
     const params = new URLSearchParams({
       client_id: this.credentials.appKey,
       redirect_uri: redirectUri,
@@ -168,6 +173,7 @@ export class RealDingTalkAuthAdapter implements IdentityProviderAdapter {
       scope: 'openid corpid',
       state,
     })
+    if (options?.promptConsent) params.set('prompt', 'consent')
     return `https://login.dingtalk.com/oauth2/auth?${params}`
   }
 
@@ -209,9 +215,23 @@ export class RealDingTalkAuthAdapter implements IdentityProviderAdapter {
     const response = await fetch(`${this.apiBase}/v1.0/contact/users/me`, {
       headers: { 'x-acs-dingtalk-access-token': tokenSet.accessToken },
     })
-    const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>
+    const bodyText = await response.text().catch(() => '')
+    let payload: Record<string, unknown> = {}
+    try {
+      payload = JSON.parse(bodyText) as Record<string, unknown>
+    } catch {
+      payload = {}
+    }
     if (!response.ok) {
-      throw new ProviderAuthError(`钉钉用户档案获取失败（HTTP ${response.status}）`, 'PROFILE_NOT_FOUND')
+      // 诊断透出：钉钉返回体含 errcode/message/requiredScopes，token 企业用于识别「选错组织」场景
+      const tokenCorpId = (tokenSet.raw as { corpId?: string }).corpId ?? '未知'
+      // AccessTokenPermissionDenied（requiredScopes 未覆盖）：多为应用新增权限点后老用户授权快照未刷新，
+      // 单独错误码供回调层识别并自动发起一次 prompt=consent 重授权
+      const scopeDenied = bodyText.includes('AccessTokenPermissionDenied')
+      throw new ProviderAuthError(
+        `钉钉用户档案获取失败（HTTP ${response.status}，token企业=${tokenCorpId}）：${bodyText.slice(0, 500)}`,
+        scopeDenied ? 'PROVIDER_SCOPE_DENIED' : 'PROFILE_NOT_FOUND',
+      )
     }
     // 优先采用用户在钉钉组织选择页实际选中的企业（userAccessToken 响应回传的 corpId），
     // 使「选定哪个组织就以哪个组织的身份命中身份链接」；无回传时按连接器归属兜底

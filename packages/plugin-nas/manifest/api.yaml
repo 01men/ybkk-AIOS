@@ -8,10 +8,6 @@ endpoints:
   - GET /api/nas/:id/fs/file?path=&inline=（流式文件下载：浏览器拿到 bytes + content-disposition attachment|inline）
   - POST /api/nas/:id/fs/search|mkdir|rename|delete|upload|download|upload-many（经网关 fs_* 工具）
   - GET/PUT /api/skill-storage（Skill 包存储后端：local | 已纳管 NAS 资产）
-  - POST /api/nas/authz/check（数据权限判定 {nasId,userId,paths[],op}）· GET /api/nas/authz/scope（作用域+矩阵快照）
-  - GET/PUT /api/nas/authz/rules（PUT 携 ifVersion 乐观锁，冲突 409）· POST /api/nas/authz/rules/import（幂等种子）
-  - POST /api/nas/authz/exceptions（资源级例外）· GET /api/nas/authz/decisions（判定留痕）
-  - POST /api/nas/authz/share-requests（share 审批申请，审批人自动路由）· POST /api/nas/authz/reconcile（组织目录对账）
 tools:
   - nas_list
   - nas_get

@@ -14,6 +14,7 @@ import {
 import { OidcService } from '../../plugin-authn/src/oidc.ts'
 import * as appTools from './tools.ts'
 import { APP_TYPE_SPEC } from './schema.ts'
+import { buildAppOnboardingPrompt, type AppOnboardingCredential } from './onboarding.ts'
 
 export interface AppUsageRecord extends RecordBase {
   appId: string
@@ -28,6 +29,19 @@ export interface AppUsageRecord extends RecordBase {
   uv?: number
 }
 
+/**
+ * 平台侧自动折算的当日访客底册（trackVisit 维护，与接入方主动上报的 usage 行分离）：
+ * 同日 DAU/UV = 集合规模（只增不减），PV 每次到访 +1，汇入 usage 行时经 max/累加语义天然合并。
+ */
+export interface AppVisitRecord extends RecordBase {
+  appId: string
+  date: string
+  /** 当日经平台身份到访的去重用户（entry-ticket 兑换 / OIDC 发码折算 DAU）。 */
+  userIds: string[]
+  /** 当日浏览器匿名访客标识（beacon 折算 UV；缺失时平台按 IP+UA 哈希兜底）。 */
+  vids: string[]
+}
+
 export class AppRegistryService extends Service {
   static readonly provide = 'appRegistry'
 
@@ -38,6 +52,10 @@ export class AppRegistryService extends Service {
 
   usage(): Collection<AppUsageRecord> {
     return this.ctx.opsStorage.collection<AppUsageRecord>('app:usage')
+  }
+
+  visits(): Collection<AppVisitRecord> {
+    return this.ctx.opsStorage.collection<AppVisitRecord>('app:visits')
   }
 
   register(input: {
@@ -80,6 +98,33 @@ export class AppRegistryService extends Service {
     this.syncAgentDependencies(appId, agentIds)
     this.ctx.platformBus.emit(PlatformEvents.AppUpdated, { id: appId, name: updated.name, actor: 'console' })
     return updated
+  }
+
+  /**
+   * 生成接入提示词（注册同款模板，平台侧单一事实源）：
+   * rotate=true 时轮换机器凭证 secret（旧值立即失效、存量令牌吊销）并随提示词返回；
+   * rotate=false 仅含 client_id，secret 以占位符呈现（密钥丢失场景必须 rotate 才能拿到可用凭证）。
+   */
+  buildOnboardingPrompt(appId: string, origin: string, opts: { rotate?: boolean } = {}): {
+    appName: string
+    prompt: string
+    credential: AppOnboardingCredential
+    rotated: boolean
+  } {
+    const app = this.ctx.resourceCore.get('app', appId)
+    if (!app) throw new Error(`应用不存在：${appId}`)
+    const principal = this.ctx.authn.principals().findOne((item) => item.refType === 'app' && item.refId === appId)
+    if (!principal) throw new Error(`应用机器凭证不存在（可能已被禁用或删除），无法生成接入提示词`)
+    let credential: AppOnboardingCredential
+    let rotated = false
+    if (opts.rotate) {
+      const next = this.ctx.authn.rotateMachineCredential(principal.id)
+      credential = { clientId: next.principal.clientId, clientSecret: next.clientSecret }
+      rotated = true
+    } else {
+      credential = { clientId: principal.clientId }
+    }
+    return { appName: app.name, prompt: buildAppOnboardingPrompt(app, credential, origin), credential, rotated }
   }
 
   /** 应用 → Agent 依赖图维护（编排拓扑数据源）。 */
@@ -318,6 +363,43 @@ export class AppRegistryService extends Service {
     }
   }
 
+  /**
+   * 平台侧自动折算访客指标（区别于接入方主动上报 recordUsage）：
+   *   - entry-ticket 兑换 / OIDC 发码 → 平台身份访客（按 userId 去重，折算 DAU）；
+   *   - 浏览器 beacon → 匿名访客（按 vid 去重，折算 UV）+ PV 逐次累加。
+   * 同一日集合只增不减，DAU/UV 以集合规模经 recordUsage 的 max 语义汇入、PV 走累加；
+   * 未知应用静默忽略（公开 beacon 端点不得向调用方泄露应用存在性）。
+   */
+  trackVisit(appId: string, visitor: { userId?: string; vid?: string; pv?: number }): void {
+    if (!this.ctx.resourceCore.get('app', appId)) return
+    const userId = visitor.userId === undefined ? undefined : String(visitor.userId).trim().slice(0, 128)
+    const vid = visitor.vid === undefined ? undefined : String(visitor.vid).trim().slice(0, 128)
+    const pv = Math.max(0, Math.min(10, Math.floor(Number(visitor.pv ?? 0)) || 0))
+    if (!userId && !vid && pv === 0) return
+    const date = new Date().toISOString().slice(0, 10)
+    const record = this.visits().findOne((item) => item.appId === appId && item.date === date)
+      ?? this.visits().insert({ id: newId('apv'), appId, date, userIds: [], vids: [] })
+    // 单应用单日底册封顶（公开端点写入面，防异常膨胀；正常内网流量远达不到）
+    const CAP = 10_000
+    const userIds = record.userIds ?? []
+    const vids = record.vids ?? []
+    if (userId && !userIds.includes(userId) && userIds.length < CAP) userIds.push(userId)
+    if (vid && !vids.includes(vid) && vids.length < CAP) vids.push(vid)
+    this.visits().update(record.id, { userIds, vids })
+    this.pruneVisits()
+    this.recordUsage(appId, {
+      ...(pv > 0 ? { pv } : {}),
+      dau: userIds.length,
+      uv: userIds.length + vids.length,
+    })
+  }
+
+  /** 访客底册保留 31 天（仅服务当日折算与对账，久置无价值）。 */
+  private pruneVisits(): void {
+    const cutoff = new Date(Date.now() - 31 * 86_400_000).toISOString().slice(0, 10)
+    for (const record of this.visits().find((item) => item.date < cutoff)) this.visits().remove(record.id)
+  }
+
   metrics(appId: string): {
     dau: number
     mau: number
@@ -382,6 +464,21 @@ export const inject = ['opsStorage', 'platformBus', 'resourceCore', 'authn', 'oi
 export function apply(ctx: Context) {
   const registry = new AppRegistryService(ctx)
   ctx.plugin(appTools)
+  // 平台侧自动折算（指标口径补全）：SSO 身份到访 → 应用 DAU，经事件总线解耦（不直连 authn/console）。
+  // entry-ticket 兑换（console 发射）与 OIDC 发码（authn OidcService 发射）都代表用户已带平台身份进入应用。
+  ctx.platformBus.on(PlatformEvents.EntryTicketRedeemed, (payload) => {
+    const p = payload as { refType?: string; refId?: string; userId?: string }
+    if (p.refType === 'app' && p.refId && p.userId) {
+      try { registry.trackVisit(p.refId, { userId: p.userId }) } catch (error) { ctx.logger('app').warn('entry-ticket 兑换折算 DAU 失败', error) }
+    }
+  })
+  ctx.platformBus.on(PlatformEvents.OidcAuthorizeGranted, (payload) => {
+    const p = payload as { clientId?: string; userId?: string }
+    const client = p.clientId !== undefined ? ctx.oidc.clientByClientId(p.clientId) : undefined
+    if (client?.refType === 'app' && client.refId && p.userId) {
+      try { registry.trackVisit(client.refId, { userId: p.userId }) } catch (error) { ctx.logger('app').warn('OIDC 发码折算 DAU 失败', error) }
+    }
+  })
   ctx.effect(() => ctx.audit.registerExecutor('app.online', async (payload) => {
     // 上线门禁（点 2，兜底）：审批挂单期间客户端可能被禁用——执行前复核，失效则执行失败留痕
     const app = ctx.resourceCore.get('app', String(payload['appId']))

@@ -2,10 +2,8 @@
 plugin: dsh-plugin-nas
 routes:
   - #/nas
-  - #/nas-authz（数据权限：矩阵/例外/锚点映射/check 试算/判定留痕/对账）
 menus:
 -
   group: AI 资源
   items:
     - NAS 存储
-    - 数据权限
