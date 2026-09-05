@@ -84,12 +84,16 @@ export async function renderApps(content, params, ctx) {
           ${(app.attrs['channels'] ?? []).map((ch) => `<span class="badge badge-muted no-dot">${esc(ch)}</span>`).join('')}
         </div>
         <div class="res-foot">
-          <span class="metric">${icon('eye', 13)}PV ${fmtNum(app.metrics.pv ?? 0)}</span>
-          <span class="metric">${icon('users', 13)}UV ${fmtNum(app.metrics.uv ?? 0)}</span>
-          <span class="metric">${icon('users', 13)}DAU ${fmtNum(app.metrics.dau)}</span>
-          <span class="metric">${icon('activity', 13)}会话 ${fmtNum(app.metrics.sessions)}</span>
-          ${app.attrs['url'] ? `<a class="btn btn-ghost btn-sm" data-entry href="javascript:void(0)">${icon('external', 13)}打开</a>` : ''}
-          <span style="margin-left:auto" class="text-4">${app.attrs['developerName'] ? `开发者 · ${esc(app.attrs['developerName'])}` : ''}</span>
+          <div class="res-foot-main">
+            <span class="metric">${icon('eye', 13)}PV ${fmtNum(app.metrics.pv ?? 0)}</span>
+            <span class="metric">${icon('users', 13)}UV ${fmtNum(app.metrics.uv ?? 0)}</span>
+            <span class="metric">${icon('users', 13)}DAU ${fmtNum(app.metrics.dau)}</span>
+            <span class="metric">${icon('activity', 13)}会话 ${fmtNum(app.metrics.sessions)}</span>
+          </div>
+          <div class="res-foot-side">
+            ${app.attrs['url'] ? `<a class="btn btn-ghost btn-sm" data-entry href="javascript:void(0)">${icon('external', 13)}打开</a>` : ''}
+            ${app.attrs['developerName'] ? `<span class="text-4">开发者 · ${esc(app.attrs['developerName'])}</span>` : ''}
+          </div>
         </div>
       </div>`)
     const entryBtn = card.querySelector('[data-entry]')

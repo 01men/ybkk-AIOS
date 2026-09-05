@@ -28,7 +28,7 @@ const NAV = [
     { path: '#/dashboard', label: '工作台', icon: 'dashboard', perm: 'console.login' },
   ] },
   { section: 'AI 资源', items: [
-    { path: '#/skills', label: 'Skill 市场', icon: 'sparkles', perm: 'skill.read' },
+    { path: '#/skills', label: 'Skill 市场', icon: 'sparkles', perm: 'skill.read', badge: 'skills' },
     { path: '#/agents', label: 'Agent 本体', icon: 'bot', perm: 'agent.read' },
     { path: '#/apps', label: 'AI 应用', icon: 'app', perm: 'app.read' },
     { path: '#/mcp', label: 'MCP 服务', icon: 'plug', perm: 'mcp.service.read' },
@@ -184,7 +184,7 @@ function renderShell(page, params, builder) {
 async function refreshBadges() {
   try {
     const overview = await api.get('/api/overview')
-    const targets = { approvals: overview.approvals?.pending ?? 0, alerts: overview.alerts?.unread ?? 0 }
+    const targets = { approvals: overview.approvals?.pending ?? 0, alerts: overview.alerts?.unread ?? 0, skills: overview.skills?.pendingApproval ?? 0 }
     for (const section of NAV) {
       for (const item of section.items) {
         if (!item._badgeEl || !item.badge) continue

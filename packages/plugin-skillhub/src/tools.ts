@@ -88,7 +88,7 @@ export function apply(ctx: Context) {
     },
     output: { type: 'object', additionalProperties: true },
     async execute(args) {
-      const skill = await ctx.skillHub.publish(args.skillId, args.version, 'agent-tool')
+      const skill = await ctx.skillHub.publish(args.skillId, args.version, { id: 'platform', name: 'agent-tool' })
       const target = skill.versions.find((item) => item.version === args.version)
       return { id: skill.id, status: skill.status, package: target?.package ?? null }
     },

@@ -244,8 +244,11 @@ export class NasRegistryService extends Service {
   /**
    * 上传文件到 NAS：buffer/本地文件 → 平台 staging 目录 → 网关 fs_upload（网关读本地 staging）。
    * 超时随字节数放宽（基线 30s + 每 MB 1s，上限 10 分钟）。跨机部署需共享 staging 卷。
+   * onBehalf=false（默认 true）为平台服务身份直连：不透传 X-On-Behalf-User 头（网关以令牌
+   * 绑定账号做数据权限判定，须有目标目录的显式 allow 例外），actor 仅进平台审计/计量——
+   * 用于平台自有存储区写入（如 Skill 包上架），不应随操作人个人数据权限起伏。
    */
-  async uploadFile(id: string, input: { buffer?: Buffer; localFile?: string; destPath: string; actor: { id: string; name: string } }): Promise<{ path: string; sizeBytes: number }> {
+  async uploadFile(id: string, input: { buffer?: Buffer; localFile?: string; destPath: string; actor: { id: string; name: string }; onBehalf?: boolean }): Promise<{ path: string; sizeBytes: number }> {
     const nas = this.requireNas(id)
     let stagingFile: string
     let sizeBytes: number
@@ -263,7 +266,7 @@ export class NasRegistryService extends Service {
     const fullPath = this.toFullPath(id, input.destPath)
     const destDir = `/${fullPath.split('/').filter(Boolean).slice(0, -1).join('/')}`
     const timeoutMs = Math.min(600_000, 30_000 + Math.ceil(sizeBytes / (1024 * 1024)) * 1000)
-    await this.fsCall(id, 'fs_upload', { local_file: stagingFile, dest_path: destDir || '/', create_parents: true, overwrite: true }, { actor: input.actor, bytes: sizeBytes, timeoutMs })
+    await this.fsCall(id, 'fs_upload', { local_file: stagingFile, dest_path: destDir || '/', create_parents: true, overwrite: true }, { actor: input.actor, bytes: sizeBytes, timeoutMs, onBehalf: input.onBehalf })
     this.fsAudit(input.actor, 'nas.fs.upload', id, `${input.destPath}（${sizeBytes}B，staging=${stagingFile}）`)
     return { path: input.destPath, sizeBytes }
   }
@@ -396,9 +399,9 @@ export class NasRegistryService extends Service {
     return client
   }
 
-  private async fsCall(id: string, tool: string, args: Record<string, unknown>, meter?: { actor?: { id: string; name: string }; bytes?: number; timeoutMs?: number }): Promise<unknown> {
+  private async fsCall(id: string, tool: string, args: Record<string, unknown>, meter?: { actor?: { id: string; name: string }; bytes?: number; timeoutMs?: number; onBehalf?: boolean }): Promise<unknown> {
     const nas = this.requireOnline(id)
-    const onBehalf = this.onBehalfHeaders(meter?.actor)
+    const onBehalf = meter?.onBehalf === false ? {} : this.onBehalfHeaders(meter?.actor)
     const raw = await this.clientFor(nas).call(tool, args, {
       ...(meter?.timeoutMs ? { timeoutMs: meter.timeoutMs } : {}),
       ...(Object.keys(onBehalf).length > 0 ? { headers: onBehalf } : {}),

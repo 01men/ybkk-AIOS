@@ -50,6 +50,8 @@ export const PlatformEvents = {
   SkillPublished: 'skill.published',
   SkillDeprecated: 'skill.deprecated',
   SkillInstalled: 'skill.installed',
+  SkillUpdated: 'skill.updated',
+  SkillPackageReplaced: 'skill.package_replaced',
   AgentRegistered: 'agent.registered',
   AgentOnlined: 'agent.onlined',
   AgentOfflined: 'agent.offlined',

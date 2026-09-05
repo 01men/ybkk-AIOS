@@ -1373,9 +1373,12 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
   }))
 
   guarded('POST', '/api/mcp/services', 'mcp.service.write', (exchange) => {
-    const input = body<{ name: string; slug?: string; description?: string; icon?: string; endpoint?: string; transport?: 'stdio' | 'sse' | 'http'; mode?: 'hosted' | 'external'; orgId: string; headers?: Record<string, string>; tools?: Array<{ name: string; description: string; riskLevel?: 'read' | 'write' | 'admin'; inputSchema?: Record<string, unknown> }> }>(exchange)
+    const input = body<{ name: string; slug?: string; description?: string; icon?: string; endpoint?: string; transport?: 'stdio' | 'sse' | 'http'; mode?: 'hosted' | 'external'; orgId?: string; headers?: Record<string, string>; tools?: Array<{ name: string; description: string; riskLevel?: 'read' | 'write' | 'admin'; inputSchema?: Record<string, unknown> }> }>(exchange)
+    // orgId 缺省回落根组织（与 /api/mcp/import 同口径）：外部推送方（机器凭证）无需 iam.org.read 即可注册
+    const orgId = input.orgId ?? ctx.iam.orgs().findOne((org) => org.parentId === null)?.id
     const service = ctx.mcpRegistry.createService({
       ...input,
+      ...(orgId ? { orgId } : {}),
       owner: caller(exchange).name,
       ...(input.tools ? { tools: input.tools.map((tool) => ({
         name: tool.name,
@@ -1894,11 +1897,13 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
     if (exchange.query.get('pending') === '1') {
       return { skills: ctx.skillHub.skills().find((skill) => ['pending_approval', 'scanning', 'rejected'].includes(skill.status)) }
     }
+    // 市场列表含在途项（待审批/扫描中，排最前带状态徽标）：审批人无需切页即可看到待办
     const skills = ctx.skillHub.search({
       q: exchange.query.get('q') ?? undefined,
       category: exchange.query.get('category') ?? undefined,
       tag: exchange.query.get('tag') ?? undefined,
       sort: (exchange.query.get('sort') ?? 'downloads') as 'downloads' | 'rating' | 'updated',
+      includePending: true,
     })
     return { skills, categories: ctx.skillHub.categories() }
   })
@@ -1935,9 +1940,43 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
   guarded('POST', '/api/skills/:id/publish', 'skill.publish', async (exchange) => {
     const { version } = body<{ version?: string }>(exchange)
     const skill = ctx.skillHub.detail(exchange.params['id']!)
-    const result = await ctx.skillHub.publish(skill.id, version ?? skill.currentVersion, caller(exchange).name)
+    const info = caller(exchange)
+    // 真实账号标识（非显示名）：显示名（中文名）非账号，无法透传身份头，也会污染审计归属
+    const result = await ctx.skillHub.publish(skill.id, version ?? skill.currentVersion, { id: info.userId ?? info.principalId, name: info.name })
     changeLog(exchange, 'skill.publish', 'skill', skill.id, skill.name)
     return result
+  })
+
+  /** 编辑已上架 Skill 的市场信息：仅作者本人或持 skill.publish 的管理员。 */
+  guarded('PATCH', '/api/skills/:id', 'skill.submit', (exchange) => {
+    const input = body<{ name?: string; category?: string; tags?: string[]; summary?: string; description?: string; visibility?: 'all' | 'orgs' | 'groups'; targetOrgs?: string[]; applicableModels?: string[]; deps?: string[]; cover?: string; authorName?: string }>(exchange)
+    const info = caller(exchange)
+    const skill = ctx.skillHub.detail(exchange.params['id']!)
+    const asAdmin = info.permissions.includes('*') || info.permissions.includes('skill.publish')
+    if (skill.authorId !== (info.userId ?? info.principalId) && !asAdmin) {
+      exchange.fail(403, 'FORBIDDEN', '仅 Skill 作者或平台管理员可编辑该 Skill 信息')
+      return
+    }
+    const result = ctx.skillHub.update(skill.id, input, { id: info.userId ?? info.principalId, name: info.name }, { asAdmin })
+    changeLog(exchange, 'skill.update', 'skill', skill.id, result.name, `编辑字段：${Object.keys(input).filter((key) => input[key as keyof typeof input] !== undefined).join('、') || '无'}`)
+    return result
+  })
+
+  /** 重新手动上传当前已发布版本的 skill.zip 资源包（原地替换，版本号不变）。 */
+  guarded('PUT', '/api/skills/:id/package', 'skill.submit', async (exchange) => {
+    const { packageBase64 } = body<{ packageBase64?: string }>(exchange)
+    if (!packageBase64) throw new Error('packageBase64 必填')
+    const info = caller(exchange)
+    const skill = ctx.skillHub.detail(exchange.params['id']!)
+    const asAdmin = info.permissions.includes('*') || info.permissions.includes('skill.publish')
+    if (skill.authorId !== (info.userId ?? info.principalId) && !asAdmin) {
+      exchange.fail(403, 'FORBIDDEN', '仅 Skill 作者或平台管理员可更新该 Skill 资源包')
+      return
+    }
+    const result = await ctx.skillHub.replacePackage(skill.id, packageBase64, { id: info.userId ?? info.principalId, name: info.name }, { asAdmin })
+    const pkg = result.versions.find((item) => item.version === result.currentVersion)?.package
+    changeLog(exchange, 'skill.package.replace', 'skill', skill.id, skill.name, `v${result.currentVersion} 资源包重传（${pkg?.storage === 'nas' ? 'NAS' : '平台本地'}${pkg?.sizeBytes !== undefined ? ` · ${pkg.sizeBytes}B` : ''}）`)
+    return { skill: result, package: pkg }
   })
 
   guarded('POST', '/api/skills/:id/deprecate', 'skill.publish', (exchange) => {
@@ -2795,7 +2834,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
   }))
 
   // 开发者选择器数据源（注册表单下拉/搜索用）：挂在 app.write 下——能注册应用即可枚举
-  // 在编用户的瘦字段（id/姓名/账号/部门），不经 iam.user.read；须注册在 /api/apps/:id 之前（路由先匹配先中）
+  // 在编用户的瘦字段（id/姓名/账号/部门/钉钉 unionId 绑定），不经 iam.user.read；须注册在 /api/apps/:id 之前（路由先匹配先中）
   guarded('GET', '/api/apps/developer-options', 'app.write', () => ({
     options: ctx.iam.users().find((user) => user.status === 'active')
       .sort((a, b) => a.displayName.localeCompare(b.displayName, 'zh-Hans-CN'))
@@ -2804,6 +2843,8 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
         name: user.displayName,
         username: user.username,
         orgName: ctx.iam.orgs().get(user.orgId)?.name ?? '',
+        // 钉钉身份绑定 unionId：供外部推送方把表格人员字段的 unionId 解析成平台账号（开发者字段落 developerId + 真实姓名）
+        unionIds: (user.bindings ?? []).filter((b) => b.provider === 'dingtalk').map((b) => b.unionId),
       })),
   }))
 

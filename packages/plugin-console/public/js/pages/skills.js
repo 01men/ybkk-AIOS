@@ -34,7 +34,7 @@ export async function renderSkills(content, params, ctx) {
       <div class="page-actions">
         <button class="btn btn-default" id="skill-storage">${icon('server', 14)}存储配置</button>
         <button class="btn btn-default" id="skill-mine">${icon('user', 14)}我的提交</button>
-        ${session.can('skill.approve') ? `<button class="btn btn-default" id="skill-review">${icon('checkSquare', 14)}待审批</button>` : ''}
+        ${session.can('skill.approve') ? `<button class="btn btn-default" id="skill-review">${icon('checkSquare', 14)}待审批<span class="badge badge-danger no-dot" id="skill-review-count" style="margin-left:6px;display:none">0</span></button>` : ''}
         <button class="btn btn-primary" id="skill-submit">${icon('plus', 14)}提交 Skill</button>
       </div>
     </div>
@@ -55,10 +55,23 @@ export async function renderSkills(content, params, ctx) {
 
   let state = { q: '', cat: '', sort: 'downloads', mode: 'market' }
 
+  // 待审批徽标：在途项计数（驳回不算待办），让审批人在市场页第一眼看到待办
+  const updateReviewBadge = async () => {
+    const badge = $('#skill-review-count')
+    if (!badge) return
+    try {
+      const result = await api.get('/api/skills' + api.qs({ pending: 1 }))
+      const actionable = (result.skills ?? []).filter((s) => s.status !== 'rejected').length
+      badge.textContent = String(actionable)
+      badge.style.display = actionable > 0 ? '' : 'none'
+    } catch { /* 静默 */ }
+  }
+
   const refresh = async () => {
     const query = api.qs(state.mode === 'mine' ? { mine: 1 } : state.mode === 'review' ? { pending: 1 } : { q: state.q || undefined, category: state.cat || undefined, sort: state.sort })
     const result = await api.get('/api/skills' + query)
     renderCards(result.skills ?? [])
+    void updateReviewBadge()
   }
 
   function renderCards(skills) {
@@ -174,6 +187,8 @@ async function openSkillDetail(id, ctx, refresh) {
     foot: `
       ${skill.status === 'published' ? `<button class="btn btn-default" id="sk-download">${icon('download', 14)}下载</button>` : ''}
       ${skill.status === 'published' && session.can('skill.install') ? `<button class="btn btn-primary" id="sk-install">${icon('plus', 14)}安装到 Agent</button>` : ''}
+      ${canManage(skill) ? `<button class="btn btn-default" id="sk-edit">${icon('edit', 14)}编辑信息</button>` : ''}
+      ${canManage(skill) && skill.versions.some((v) => v.status === 'published') ? `<button class="btn btn-default" id="sk-repkg">${icon('refresh', 14)}更新资源包</button>` : ''}
       ${session.can('skill.approve') && (current?.status === 'pending_domain' || current?.status === 'pending_security') ? `<button class="btn btn-primary" id="sk-approve">${icon('check', 14)}审批</button>` : ''}
       ${session.can('skill.approve') && current?.status === 'approved' && skill.status !== 'published' ? `<button class="btn btn-primary" id="sk-publish">${icon('send', 14)}上架</button>` : ''}
       ${session.can('skill.publish') && skill.status === 'published' ? `<button class="btn btn-danger-ghost" id="sk-deprecate">${icon('alert', 14)}弃用</button>` : ''}
@@ -273,6 +288,10 @@ async function openSkillDetail(id, ctx, refresh) {
       } catch (error) { toast(error.message, 'error') }
     }
   }
+  const editBtn = drawer.el.querySelector('#sk-edit')
+  if (editBtn) editBtn.onclick = () => openEditModal(skill, ctx, refresh)
+  const repkgBtn = drawer.el.querySelector('#sk-repkg')
+  if (repkgBtn) repkgBtn.onclick = () => openReplacePackageModal(skill, ctx, refresh)
   const approveBtn = drawer.el.querySelector('#sk-approve')
   if (approveBtn) approveBtn.onclick = () => {
     const needLevel = current?.status === 'pending_domain' ? 'domain' : 'security'
@@ -393,6 +412,111 @@ function openSubmitModal(ctx, refresh) {
           foot: '<button class="btn btn-primary" data-ok>知道了</button>',
         })
       }
+      refresh?.()
+    } catch (error) {
+      toast(error.message, 'error')
+    } finally {
+      btn.classList.remove('btn-loading')
+    }
+  }
+}
+
+/** 是否可管理该 Skill（编辑信息 / 更新资源包）：作者本人或平台管理员。 */
+function canManage(skill) {
+  return skill.authorId === session.user?.id || session.can('skill.publish')
+}
+
+/** 编辑已上架 Skill 的市场信息（名称/分类/标签/简介/描述/适用模型/依赖/可见性）；slug 保持不变。 */
+function openEditModal(skill, ctx, refresh) {
+  const CATEGORIES = ['办公提效', '研发效能', '客户服务', '数据分析', '人事行政', '市场情报', '法务合规', '通用']
+  const modal = openModal({
+    title: `编辑信息 · ${skill.name}`, wide: true,
+    body: `
+      <div class="muted-box mb-14" style="display:flex;gap:8px">
+        ${icon('info', 15)}<span>直接更新市场展示信息，无需重新走审批；Skill 标识（slug）与已有版本保持不变。SKILL.md 内容变更请提交新版本。</span>
+      </div>
+      <div class="form-grid">
+        ${field('名称', inputField('name', { value: skill.name }), { required: true })}
+        ${field('分类', selectField('category', CATEGORIES.map((c) => ({ value: c, label: c })), { value: skill.category }))}
+        ${field('作者 / 开发者名称', inputField('authorName', { value: skill.authorName }), { hint: '市场署名（列表与详情展示）；Skill 归属账号不变' })}
+        ${field('一句话简介', inputField('summary', { value: skill.summary }), { full: true })}
+        ${field('标签（逗号分隔）', inputField('tags', { value: (skill.tags ?? []).join(','), placeholder: '文档,自动化' }))}
+        ${field('适用模型（逗号分隔）', inputField('applicableModels', { value: (skill.applicableModels ?? []).join(',') }))}
+        ${field('依赖 Skill slug（逗号分隔）', inputField('deps', { value: (skill.deps ?? []).join(',') }), { hint: '安装该 Skill 时建议一并安装的前置 Skill' })}
+        ${field('可见性', selectField('visibility', [
+          { value: 'all', label: '全员可见' },
+          { value: 'orgs', label: '指定组织可见' },
+        ], { value: skill.visibility === 'orgs' ? 'orgs' : 'all' }))}
+        ${field('目标组织 ID（逗号分隔）', inputField('targetOrgs', { value: (skill.targetOrgs ?? []).join(','), placeholder: 'org_xxx,org_yyy' }), { full: true, hint: '可见性为「指定组织」时必填；成员仅在其所属组织内可见该 Skill' })}
+      </div>
+      ${field('详细描述', textareaField('description', { value: skill.description || '', rows: 6, placeholder: '面向使用者的完整说明：能力边界、前置条件、使用示例…' }))}`,
+    foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>保存</button>',
+  })
+  const syncOrgVisibility = () => {
+    const needOrg = modal.body.querySelector('[name="visibility"]')?.value === 'orgs'
+    const orgItem = modal.body.querySelector('[name="targetOrgs"]')?.closest('.form-item')
+    if (orgItem) orgItem.style.display = needOrg ? '' : 'none'
+  }
+  syncOrgVisibility()
+  modal.body.querySelector('[name="visibility"]').onchange = syncOrgVisibility
+  modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+  modal.el.querySelector('[data-ok]').onclick = async (e) => {
+    const btn = e.currentTarget
+    btn.classList.add('btn-loading')
+    try {
+      const data = collectForm(modal.body)
+      const toList = (value) => (value ?? '').split(/[,，]/).map((s) => s.trim()).filter(Boolean)
+      if (data.visibility === 'orgs' && toList(data.targetOrgs).length === 0) {
+        throw new Error('可见性为「指定组织」时须填写至少一个目标组织 ID')
+      }
+      await api.patch(`/api/skills/${skill.id}`, {
+        name: data.name, category: data.category, summary: data.summary, description: data.description,
+        tags: toList(data.tags), applicableModels: toList(data.applicableModels), deps: toList(data.deps),
+        visibility: data.visibility, authorName: data.authorName,
+        ...(data.visibility === 'orgs' ? { targetOrgs: toList(data.targetOrgs) } : {}),
+      })
+      toast('信息已更新'); modal.close(); drawer.close()
+      openSkillDetail(skill.id, ctx, refresh)
+      refresh?.()
+    } catch (error) {
+      toast(error.message, 'error')
+    } finally {
+      btn.classList.remove('btn-loading')
+    }
+  }
+}
+
+/** 重新手动上传当前已发布版本的 skill.zip 资源包（原地替换，版本号不变）。 */
+function openReplacePackageModal(skill, ctx, refresh) {
+  const published = [...skill.versions].reverse().find((v) => v.status === 'published')
+  const pkg = published?.package
+  const modal = openModal({
+    title: `更新资源包 · v${published?.version ?? skill.currentVersion}`,
+    body: `
+      <div class="muted-box mb-14" style="display:flex;gap:8px">
+        ${icon('info', 15)}<span>上传新的 skill.zip 原地替换当前已发布版本的资源包：<b>版本号不变</b>、不重走审批；下载/安装即刻取到新包。存储后端为 NAS 时会同步重传（失败则本次更新不生效）。</span>
+      </div>
+      ${pkg ? `
+      <div class="desc-grid mb-14">
+        <div class="desc-item"><span class="k">当前包</span><span class="v">${pkg.storage === 'nas' ? `NAS · ${esc(pkg.path ?? '')}` : '平台本地'}</span></div>
+        ${pkg.sizeBytes !== undefined ? `<div class="desc-item"><span class="k">大小</span><span class="v">${fmtBytes(pkg.sizeBytes)}</span></div>` : ''}
+        ${pkg.uploadedAt ? `<div class="desc-item"><span class="k">上传于</span><span class="v">${timeAgo(pkg.uploadedAt)}</span></div>` : ''}
+      </div>` : ''}
+      ${field('skill.zip 包', '<input class="input" type="file" id="skill-repkg" accept=".zip,application/zip">', { required: true, hint: '须为合法 ZIP（PK 魔数），base64 后上限 32MB' })}`,
+    foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>上传并替换</button>',
+  })
+  modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+  modal.el.querySelector('[data-ok]').onclick = async (e) => {
+    const btn = e.currentTarget
+    const file = modal.body.querySelector('#skill-repkg')?.files?.[0]
+    if (!file) return toast('请选择 skill.zip 文件', 'error')
+    btn.classList.add('btn-loading')
+    try {
+      const packageBase64 = await readFileBase64(file)
+      const result = await api.put(`/api/skills/${skill.id}/package`, { packageBase64 })
+      toast(`资源包已更新（${fmtBytes(result.package?.sizeBytes ?? 0)}${result.package?.storage === 'nas' ? ' · 已上传 NAS' : ''}）`)
+      modal.close(); drawer.close()
+      openSkillDetail(skill.id, ctx, refresh)
       refresh?.()
     } catch (error) {
       toast(error.message, 'error')

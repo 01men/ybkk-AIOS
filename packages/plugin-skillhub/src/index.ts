@@ -284,8 +284,11 @@ export class SkillHubService extends Service {
   /**
    * 上架：审批通过 →（可选）skill.zip 上传 NAS 存储后端 → 版本标记 published。
    * 存储后端为 nas 时 fail-closed：包上传失败即上架失败（错误信息含网关/中转目录排查指引）。
+   * NAS 上传走平台服务身份（onBehalf=false）：存储区写入是平台自身能力，不随操作人个人
+   * NAS 数据权限起伏（操作人仍留在平台审计/事件里；网关侧以令牌绑定账号判定，需有
+   * skill 存储目录的显式 allow 例外——数据权限页可配）。
    */
-  async publish(skillId: string, version: string, actor: string): Promise<SkillRecord> {
+  async publish(skillId: string, version: string, actor: { id: string; name: string }): Promise<SkillRecord> {
     const skill = this.requireSkill(skillId)
     const target = skill.versions.find((item) => item.version === version)
     if (!target) throw new Error(`版本不存在：${version}`)
@@ -304,12 +307,13 @@ export class SkillHubService extends Service {
         const uploaded = await this.ctx.nasRegistry.uploadFile(nasId, {
           buffer,
           destPath,
-          actor: { id: actor, name: actor },
+          actor,
+          onBehalf: false,
         })
         packageInfo = { storage: 'nas', nasId, path: uploaded.path, sizeBytes: uploaded.sizeBytes, uploadedAt: new Date().toISOString() }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        throw new Error(`skill.zip 上传 NAS 失败，上架中止：${message}（排查：网关服务与令牌、网关侧可读的 staging 中转目录；或先把 Skill 存储切回 local）`)
+        throw new Error(`skill.zip 上传 NAS 失败，上架中止：${message}（排查：网关服务与令牌；若为数据权限拒绝，请在数据权限页为网关令牌绑定账号授予存储目录 ${basePath} 的 allow 例外；或先把 Skill 存储切回 local）`)
       }
     }
     const versions = skill.versions.map((item) =>
@@ -318,7 +322,7 @@ export class SkillHubService extends Service {
         : item)
     const updated = this.skills().update(skillId, { versions: versions as SkillVersion[], status: 'published' })
     this.ctx.platformBus.emit(PlatformEvents.SkillPublished, {
-      skillId, name: updated.name, version, actor, type: 'skill', slug: updated.slug,
+      skillId, name: updated.name, version, actor: actor.name, type: 'skill', slug: updated.slug,
       ...(packageInfo !== undefined ? { package: { storage: packageInfo.storage, path: packageInfo.path, sizeBytes: packageInfo.sizeBytes } } : {}),
     })
     return updated
@@ -343,6 +347,102 @@ export class SkillHubService extends Service {
       filename: `${skill.slug}-${target.version}.zip`,
       info: target.package ?? { storage: 'local' },
     }
+  }
+
+  // -- 编辑与资源重传 -------------------------------------------------------
+
+  /**
+   * 编辑已上架（及其他状态）Skill 的市场信息：分类/标签/简介/描述/可见性/适用模型/依赖/封面。
+   * 仅作者本人或管理员（skill.publish，路由层判定后传 asAdmin）可编辑；slug 保持稳定
+   * （Agent 按 slug 回填关联 Skill，改名不打断引用）；SKILL.md 内容不走此口——内容变更
+   * 属新版本，仍须走提交 → 扫描 → 审批流水线（版本不可变原则）。
+   */
+  update(skillId: string, patch: {
+    name?: string
+    category?: string
+    tags?: string[]
+    summary?: string
+    description?: string
+    visibility?: SkillRecord['visibility']
+    targetOrgs?: string[]
+    applicableModels?: string[]
+    deps?: string[]
+    cover?: string
+    /** 作者/开发者展示名：仅改展示（列表与详情署名），authorId 归属锚点不变。 */
+    authorName?: string
+  }, actor: { id: string; name: string }, opts?: { asAdmin?: boolean }): SkillRecord {
+    const skill = this.requireSkill(skillId)
+    if (skill.authorId !== actor.id && opts?.asAdmin !== true) {
+      throw new Error('仅 Skill 作者或平台管理员可编辑该 Skill 信息')
+    }
+    if (patch.name !== undefined && !patch.name.trim()) throw new Error('Skill 名称不能为空')
+    if (patch.authorName !== undefined && !patch.authorName.trim()) throw new Error('作者名称不能为空')
+    if (patch.tags !== undefined && (!Array.isArray(patch.tags) || patch.tags.some((tag) => typeof tag !== 'string'))) {
+      throw new Error('标签格式不正确')
+    }
+    if (patch.visibility !== undefined && !['all', 'orgs', 'groups'].includes(patch.visibility)) {
+      throw new Error(`可见性取值不合法：${patch.visibility}`)
+    }
+    if (patch.visibility === 'orgs' && patch.targetOrgs !== undefined && patch.targetOrgs.length === 0 && skill.targetOrgs.length === 0) {
+      throw new Error('可见性为「指定组织」时须至少选择一个目标组织')
+    }
+    const allowed = ['name', 'category', 'tags', 'summary', 'description', 'visibility', 'targetOrgs', 'applicableModels', 'deps', 'cover', 'authorName'] as const
+    const changes = Object.fromEntries(allowed.map((key) => [key, patch[key]]).filter(([, value]) => value !== undefined))
+    if (Object.keys(changes).length === 0) return skill
+    // 名称可改、slug 不变：slug 是安装依赖回填（agent.attrs.skills）的引用键
+    const updated = this.skills().update(skillId, {
+      ...changes,
+      ...(patch.name !== undefined ? { name: patch.name.trim() } : {}),
+      ...(patch.authorName !== undefined ? { authorName: patch.authorName.trim() } : {}),
+    })
+    this.ctx.platformBus.emit(PlatformEvents.SkillUpdated, {
+      skillId, name: updated.name, actor: actor.name, actorId: actor.id, asAdmin: opts?.asAdmin === true,
+      fields: Object.keys(changes), type: 'skill', slug: updated.slug,
+    })
+    return updated
+  }
+
+  /**
+   * 重新手动上传当前已发布版本的 skill.zip 资源包：原地替换（版本号不变），
+   * storage=nas 时按上架同链路重传 NAS（fail-closed），local 时仅更新内联包与登记。
+   * 仅作者本人或管理员可操作；替换后下载/安装取到的即是新包（packageBufferOf 优先 packageBase64）。
+   */
+  async replacePackage(skillId: string, packageBase64: string, actor: { id: string; name: string }, opts?: { asAdmin?: boolean }): Promise<SkillRecord> {
+    const skill = this.requireSkill(skillId)
+    if (skill.authorId !== actor.id && opts?.asAdmin !== true) {
+      throw new Error('仅 Skill 作者或平台管理员可更新该 Skill 资源包')
+    }
+    validatePackageBase64(packageBase64)
+    const target = skill.versions.find((item) => item.version === skill.currentVersion && item.status === 'published')
+    if (!target) throw new Error(`当前版本 ${skill.currentVersion} 不存在已发布产物，无法替换资源包`)
+    const sizeBytes = Buffer.from(packageBase64, 'base64').length
+    let packageInfo: SkillPackageInfo = { ...(target.package ?? { storage: 'local' as const }), sizeBytes, uploadedAt: new Date().toISOString() }
+    const storage = this.ctx.nasRegistry.getSkillStorage()
+    if (storage.mode === 'nas') {
+      const nasId = storage.nasId!
+      const nas = this.ctx.nasRegistry.get(nasId)
+      if (!nas) throw new Error(`Skill 包存储后端指向的 NAS 资产不存在：${nasId}（请在 Skill 存储配置中修正）`)
+      if (nas.status !== 'online') throw new Error(`Skill 包存储后端 NAS「${nas.name}」当前状态 ${nas.status}，更新中止（fail-closed）`)
+      const buffer = Buffer.from(packageBase64, 'base64')
+      const basePath = (storage.basePath ?? '/skillhub').replace(/\/+$/, '')
+      const destPath = `${basePath}/${skill.slug}/${skill.slug}-${target.version}.zip`
+      try {
+        const uploaded = await this.ctx.nasRegistry.uploadFile(nasId, { buffer, destPath, actor, onBehalf: false })
+        packageInfo = { storage: 'nas', nasId, path: uploaded.path, sizeBytes: uploaded.sizeBytes, uploadedAt: new Date().toISOString() }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        throw new Error(`skill.zip 上传 NAS 失败，资源包未更新：${message}（排查：网关服务与令牌；若为数据权限拒绝，请在数据权限页为网关令牌绑定账号授予存储目录 ${basePath} 的 allow 例外；或先把 Skill 存储切回 local）`)
+      }
+    }
+    const versions = skill.versions.map((item) =>
+      item.version === target.version ? { ...item, packageBase64, package: packageInfo } : item)
+    const updated = this.skills().update(skillId, { versions: versions as SkillVersion[] })
+    this.ctx.platformBus.emit(PlatformEvents.SkillPackageReplaced, {
+      skillId, name: updated.name, version: target.version, actor: actor.name, actorId: actor.id,
+      asAdmin: opts?.asAdmin === true, storage: packageInfo.storage, sizeBytes: packageInfo.sizeBytes,
+      type: 'skill', slug: updated.slug,
+    })
+    return updated
   }
 
   deprecate(skillId: string, actor: string, note: string, force?: boolean): { skill: SkillRecord; referencingAgents: Array<{ id: string; name: string; owner: string }> } {
@@ -467,9 +567,14 @@ export class SkillHubService extends Service {
 
   // -- 搜索 ---------------------------------------------------------------
 
-  search(options: { q?: string; category?: string; tag?: string; sort?: 'downloads' | 'rating' | 'updated'; viewerOrgId?: string }): SkillRecord[] {
+  /**
+   * 搜索：默认仅已上架/已弃用；includePending 时把在途项（待审批/扫描中）一并呈现
+   * （排最前、按更新时间排序，带状态徽标）——让审批人直接在市场里看到待办。
+   */
+  search(options: { q?: string; category?: string; tag?: string; sort?: 'downloads' | 'rating' | 'updated'; viewerOrgId?: string; includePending?: boolean }): SkillRecord[] {
     let list = this.skills().find((skill) => {
-      if (!['published', 'deprecated'].includes(skill.status)) return false
+      const inFlight = options.includePending === true && ['pending_approval', 'scanning'].includes(skill.status)
+      if (!['published', 'deprecated'].includes(skill.status) && !inFlight) return false
       if (options.category && skill.category !== options.category) return false
       if (options.tag && !skill.tags.includes(options.tag)) return false
       if (skill.visibility === 'orgs' && options.viewerOrgId && !skill.targetOrgs.includes(options.viewerOrgId)) return false
@@ -479,13 +584,17 @@ export class SkillHubService extends Service {
       }
       return true
     })
+    const published = list.filter((skill) => ['published', 'deprecated'].includes(skill.status))
     const sort = options.sort ?? 'downloads'
-    list = list.sort((a, b) => {
+    const sorted = published.sort((a, b) => {
       if (sort === 'rating') return b.stats.rating - a.stats.rating
       if (sort === 'updated') return b.updatedAt.localeCompare(a.updatedAt)
       return b.stats.downloads - a.stats.downloads
     })
-    return list
+    if (options.includePending !== true) return sorted
+    const pending = list.filter((skill) => !['published', 'deprecated'].includes(skill.status))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    return [...pending, ...sorted]
   }
 
   detail(skillId: string): SkillRecord {

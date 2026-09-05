@@ -1825,6 +1825,33 @@ try {
   const heatRow = (heat.data?.skills ?? []).find((s) => s.id === skillId)
   check('技能热力图（skill × 日使用矩阵，含安装/下载/外部上报）', heat.ok && heatRow?.total >= 2 && Array.isArray(heatRow?.cells) && heatRow.cells.length === 30 && (heat.data.maxCell ?? 0) >= 1)
 
+  // —— 已上架 Skill 信息编辑与资源包重传（作者本人/管理员可操作，非作者开发者拒绝） ——
+  const otherDevLogin = await api('POST', '/api/auth/login', { body: { username: 'linxm', password: 'Ybk@2026' } })
+  const otherDev = otherDevLogin.data?.token
+  const editDenied = await api('PATCH', `/api/skills/${skillId}`, { token: otherDev, body: { summary: '越权改简介' } })
+  check('非作者且无管理权的开发者编辑被拒（403）', editDenied.status === 403)
+  const repkgDenied = await api('PUT', `/api/skills/${skillId}/package`, { token: otherDev, body: { packageBase64: Buffer.from('PK\x03\x04evil', 'latin1').toString('base64') } })
+  check('非作者重传资源包被拒（403）', repkgDenied.status === 403)
+
+  const editByAuthor = await api('PATCH', `/api/skills/${skillId}`, { token: dev, body: { summary: '生成自测报告（已更新）', tags: ['自测', '报告'], description: '更新后的详细描述', applicableModels: ['deepseek-chat', 'deepseek-reasoner'], visibility: 'all', authorName: '陈默（示范作者）' } })
+  check('作者编辑市场信息（slug 与版本不变，不重走审批）', editByAuthor.ok && editByAuthor.data.summary === '生成自测报告（已更新）' && editByAuthor.data.tags.join(',') === '自测,报告' && editByAuthor.data.status === 'published')
+  check('作者名称可改（仅展示署名，authorId 归属不变）', editByAuthor.ok && editByAuthor.data.authorName === '陈默（示范作者）' && editByAuthor.data.authorId === devLogin.data.user.id)
+  const editEmptyAuthor = await api('PATCH', `/api/skills/${skillId}`, { token: dev, body: { authorName: '  ' } })
+  check('编辑校验：作者名称不可为空白', !editEmptyAuthor.ok)
+  const editByAdmin = await api('PATCH', `/api/skills/${skillId}`, { token: admin, body: { category: '研发效能' } })
+  check('管理员（skill.publish）可编辑任意 Skill 信息', editByAdmin.ok && editByAdmin.data.category === '研发效能')
+  const editEmptyName = await api('PATCH', `/api/skills/${skillId}`, { token: dev, body: { name: '   ' } })
+  check('编辑校验：名称不可为空白', !editEmptyName.ok)
+
+  const skillZipBase64 = Buffer.from('PK\x03\x04skill-package-v2-content', 'latin1').toString('base64')
+  const repkgBadZip = await api('PUT', `/api/skills/${skillId}/package`, { token: dev, body: { packageBase64: Buffer.from('definitely-not-a-zip', 'latin1').toString('base64') } })
+  check('资源包校验：非 ZIP 内容被拒（PK 魔数）', !repkgBadZip.ok)
+  const repkg = await api('PUT', `/api/skills/${skillId}/package`, { token: dev, body: { packageBase64: skillZipBase64 } })
+  check('作者重传资源包（原地替换，版本号不变）', repkg.ok && repkg.data.skill.currentVersion === '1.0.0' && repkg.data.skill.status === 'published' && repkg.data.package?.sizeBytes === Buffer.from('PK\x03\x04skill-package-v2-content', 'latin1').length)
+  const repkgDetail = await api('GET', `/api/skills/${skillId}`, { token: admin })
+  const repkgVersion = repkgDetail.data?.versions?.find((v) => v.status === 'published')
+  check('资源包替换落库（已发布版本 packageBase64/登记同步更新）', repkgDetail.ok && repkgVersion?.packageBase64 === skillZipBase64 && !!repkgVersion?.package?.uploadedAt)
+
   const deprecateNoReason = await api('POST', `/api/skills/${skillId}/deprecate`, { token: admin, body: {} })
   check('弃用未填原因被拒（护栏，下架分析口径依赖）', !deprecateNoReason.ok)
 
@@ -2028,6 +2055,20 @@ try {
     promptPlain.ok && promptPlain.data.rotated === false && promptPlain.data.prompt.includes(promptPlain.data.credential.clientId)
     && promptPlain.data.prompt.includes('重新生成密钥') && !promptPlain.data.prompt.includes('client_secret：cs_'),
     JSON.stringify(promptPlain.error))
+
+  // MCP 服务注册：orgId 缺省回落根组织（外部推送方机器凭证无需 iam.org.read，与 /api/mcp/import 同口径）
+  const devOpts = await api('GET', '/api/apps/developer-options', { token: ops })
+  check('开发者选项：响应含钉钉 unionIds 绑定（表格人员字段解析用）',
+    devOpts.ok && Array.isArray(devOpts.data.options) && devOpts.data.options.every((o) => Array.isArray(o.unionIds)),
+    JSON.stringify(devOpts.error))
+
+  const mcpNoOrg = await api('POST', '/api/mcp/services', { token: ops, body: { name: 'orgId缺省自测MCP', description: 'orgId 缺省回落根组织验证', endpoint: 'https://mcp.example.com/mcp', transport: 'http', mode: 'external' } })
+  check('MCP 注册：orgId 缺省回落根组织', mcpNoOrg.ok && Boolean(mcpNoOrg.data?.orgId), JSON.stringify(mcpNoOrg.error))
+  // 清理：下线（viaApproval=false 免 L4 审批，自测资产）→ 删除
+  const mcpNoOrgOffline = await api('POST', `/api/mcp/services/${mcpNoOrg.data?.id}/offline`, { token: ops, body: { reason: '自测清理', viaApproval: false } })
+  check('MCP 注册：自测服务下线（viaApproval=false 直下）', mcpNoOrgOffline.ok, JSON.stringify(mcpNoOrgOffline.error))
+  const mcpNoOrgCleanup = await api('DELETE', `/api/mcp/services/${mcpNoOrg.data?.id}`, { token: ops })
+  check('MCP 注册：自测服务清理', mcpNoOrgCleanup.ok, JSON.stringify(mcpNoOrgCleanup.error))
 
   // ================================================================ AI 应用 ↔ SSO 打通（MVP 闭环）
   section('AI 应用 ↔ SSO 打通（注册 → 签发 → 门禁双点 → 跳转登录）')
@@ -2283,8 +2324,8 @@ try {
   }))
   check('public 客户端免 secret 换牌成功且不签发 refresh', pubTokens.access_token?.split('.').length === 3 && pubTokens.refresh_token === undefined)
 
-  // 授权事件审计留痕
-  const oidcAudit = await api('GET', '/api/audit/logs?limit=200', { token: admin })
+  // 授权事件审计留痕（按 resourceType 过滤：断言只关心两类事件是否落账，不随全量日志体量漂移）
+  const oidcAudit = await api('GET', '/api/audit/logs?resourceType=oidc_client&limit=50', { token: admin })
   check('授权事件审计留痕（granted / denied）', oidcAudit.ok && oidcAudit.data.items.some((log) => log.action === 'oidc.authorize.granted') && oidcAudit.data.items.some((log) => log.action === 'oidc.authorize.denied'))
 
   // ================================================================ 审计
@@ -2483,6 +2524,14 @@ try {
       && run(u('e_p2', 'eo1'), [inScope], 'read').reasons.some((r) => r.includes('co-leader')))
     check('挂根组织非负责人 → 全 deny', run(u('e_root', 'eo1'), ['/智造平台/x'], 'read').decision === 'deny'
       && run(u('e_root', 'eo1'), ['/智造平台/x'], 'read').reasons.some((r) => r.includes('root-no-role')))
+    check('挂根组织 + 管理员显式 allow 例外 → 例外救援放行（平台服务账号存储区授权），例外路径外/未授权 op 仍 deny',
+      (() => {
+        const rules = { ...baseRules, observeOnly: false, exceptions: [{ id: 'exc_rescue', effect: 'allow', nasId: 'en1', path: '/智造平台/服务区', ops: ['read', 'write'], userIds: ['e_root'], note: '平台服务账号存储区' }] }
+        return run(u('e_root', 'eo1'), ['/智造平台/服务区/pkg.zip'], 'write', { rules }).decision === 'allow'
+          && run(u('e_root', 'eo1'), ['/智造平台/服务区/pkg.zip'], 'read', { rules }).decision === 'allow'
+          && run(u('e_root', 'eo1'), ['/智造平台/服务区/pkg.zip'], 'delete', { rules }).decision === 'deny'
+          && run(u('e_root', 'eo1'), ['/智造平台/其他/pkg.zip'], 'write', { rules }).decision === 'deny'
+      })())
     check('未落班组（部门根非负责人）→ 只读', run(u('e_d2', 'eo2'), ['/智造平台/生产部/x'], 'read').decision === 'allow'
       && run(u('e_d2', 'eo2'), ['/智造平台/生产部/x'], 'write').decision === 'deny')
     check('兼任：主归属正常写 + 兼任子树仅只读',

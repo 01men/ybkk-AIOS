@@ -409,7 +409,24 @@ export function check(input: EngineCheckInput, ctx: EngineCheckContext): EngineD
     return finalize(base, ctx.rules, input)
   }
   if (derived.special === 'root-no-role') {
-    return denyAll(['org.root-no-role：挂根组织且非负责人，无数据权限（请落入部门/班组）'])
+    // 挂根默认全拒（推人落入部门/班组）；唯一出口是管理员显式授予的资源级 allow 例外——
+    // 平台服务账号（网关令牌绑定身份）对自有存储区的授权走这条通道，例外全量留痕可审计。
+    const verdicts = input.paths.map((path) => {
+      const rescue = ctx.rules.exceptions.find((exception) => exception.effect === 'allow'
+        && exception.nasId === input.nasId
+        && exception.ops.includes(input.op)
+        && !expired(exception, now)
+        && (!exception.userIds || exception.userIds.includes(user.id))
+        && matchExceptionPath(exception.path, path))
+      if (rescue) {
+        return { path, decision: 'allow' as const, reasons: [`exception.allow：显式授权规则 ${rescue.id} 救援挂根账号（root-no-role）${rescue.note ? `（${rescue.note}）` : ''}`], ruleId: rescue.id }
+      }
+      return { path, decision: 'deny' as const, reasons: ['org.root-no-role：挂根组织且非负责人，无数据权限（请落入部门/班组）'] }
+    })
+    base.decision = verdicts.every((verdict) => verdict.decision === 'allow') ? 'allow' : 'deny'
+    base.reasons = [...new Set(verdicts.flatMap((verdict) => verdict.reasons))]
+    base.perPath = verdicts
+    return finalize(base, ctx.rules, input)
   }
 
   const scope = deriveScope(user, ctx.nas, ctx.orgIndex)

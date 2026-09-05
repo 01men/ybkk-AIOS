@@ -267,12 +267,15 @@ export class NasAuthzService extends Service {
     if (!op) return { ...base, reasons: [`op.unsupported：未知操作 ${input.op}`], perPath: paths.map((path) => ({ path, decision: 'deny' as const, reasons: [`op.unsupported：未知操作 ${input.op}`] })) }
     const user = this.resolveUser(input.userId)
     const nas = this.nasDescriptor(input.nasId)
+    // 网关回调以 NAS IP 充当 nasId（其天然只知 IP）：统一收敛到平台资产 ID，
+    // 保证例外/规则的 nasId 按键一致命中（否则 IP 字面量 ≠ 资产 ID，显式授权永不生效）。
+    const canonicalNasId = nas?.id ?? input.nasId
     const orgIndex = this.orgIndex()
     const engineUser: EngineUser | undefined = user
       ? { id: user.id, displayName: user.displayName, orgId: user.orgId, ...(user.primaryOrgId !== undefined ? { primaryOrgId: user.primaryOrgId } : {}), ...(user.accountType !== undefined ? { accountType: user.accountType } : {}), status: user.status }
       : undefined
     const decision = engineCheck(
-      { userId: input.userId, nasId: input.nasId, paths, op, ...(input.override !== undefined ? { override: input.override } : {}) },
+      { userId: input.userId, nasId: canonicalNasId, paths, op, ...(input.override !== undefined ? { override: input.override } : {}) },
       {
         orgIndex,
         ...(engineUser !== undefined ? { user: engineUser } : {}),
@@ -286,14 +289,14 @@ export class NasAuthzService extends Service {
     const highRisk = HIGH_RISK_OPS.has(op)
     if (decision.decision === 'deny' || highRisk) {
       this.ctx.platformBus.emit('nas.authz.decision', {
-        nasId: input.nasId, userId: user?.id ?? input.userId, ...(user ? { userName: user.displayName } : {}),
+        nasId: canonicalNasId, userId: user?.id ?? input.userId, ...(user ? { userName: user.displayName } : {}),
         op, paths, decision: decision.decision, ...(decision.role !== undefined ? { role: decision.role } : {}),
         scope: decision.scope, reasons: decision.reasons, ...(decision.ruleId !== undefined ? { ruleId: decision.ruleId } : {}),
         caller, override: input.override === true, observeOnly: rules.observeOnly, highRisk,
       } satisfies Omit<AuthzDecisionRecord, 'id' | 'createdAt' | 'updatedAt'>)
     }
     if (decision.decision === 'deny' && rules.observeOnly === false) {
-      this.trackDeniedBurst(user?.id ?? input.userId, { nasId: input.nasId, op, paths })
+      this.trackDeniedBurst(user?.id ?? input.userId, { nasId: canonicalNasId, op, paths })
       this.ctx.platformBus.emit('nas.authz.denied', {
         userId: user?.id ?? input.userId, userName: user?.displayName ?? input.userId,
         nasId: input.nasId, op, paths, reasons: decision.reasons, caller,

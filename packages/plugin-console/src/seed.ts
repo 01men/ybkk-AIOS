@@ -237,7 +237,7 @@ async function seedDemo(ctx: Context): Promise<void> {
         ctx.skillHub.approve(skill.id, target.version, 'security', { id: admin.id, name: admin.displayName }, '安全团队加签通过')
       }
     }
-    const published = await ctx.skillHub.publish(skill.id, target.version, opsAdmin.displayName)
+    const published = await ctx.skillHub.publish(skill.id, target.version, { id: opsAdmin.id, name: opsAdmin.displayName })
     return ctx.skillHub.skills().get(published.id)!
   }
 
